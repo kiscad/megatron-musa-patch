@@ -17,6 +17,7 @@ from __future__ import annotations
 
 from . import (
     _checkpointing,
+    _control_collectives,
     _device_arch,
     _distributed,
     _layer_norm,
@@ -40,6 +41,7 @@ MODULES = (
     _rope,
     _training,
     _checkpointing,
+    _control_collectives,
 )
 
 #: Same-target factories compose in registration order. Same-module companion
