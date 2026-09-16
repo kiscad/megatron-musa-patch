@@ -16,6 +16,8 @@ correctness and performance on the actual upgraded stack.
 from __future__ import annotations
 
 from . import (
+    _device_arch,
+    _distributed,
     _torch_backend,
 )
 
@@ -26,6 +28,8 @@ __all__ = ["PATCHES", "MODULES"]
 #: its own replacement is being built already sees a working namespace.
 MODULES = (
     _torch_backend,
+    _device_arch,
+    _distributed,
 )
 
 #: Same-target factories compose in registration order. Same-module companion
