@@ -16,6 +16,7 @@ correctness and performance on the actual upgraded stack.
 from __future__ import annotations
 
 from . import (
+    _checkpointing,
     _device_arch,
     _distributed,
     _layer_norm,
@@ -38,6 +39,7 @@ MODULES = (
     _layer_norm,
     _rope,
     _training,
+    _checkpointing,
 )
 
 #: Same-target factories compose in registration order. Same-module companion
