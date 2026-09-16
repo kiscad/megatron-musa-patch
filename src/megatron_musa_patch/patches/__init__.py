@@ -19,6 +19,7 @@ from . import (
     _device_arch,
     _distributed,
     _layer_norm,
+    _rope,
     _torch_backend,
     _transformer_engine,
 )
@@ -34,6 +35,7 @@ MODULES = (
     _distributed,
     _transformer_engine,
     _layer_norm,
+    _rope,
 )
 
 #: Same-target factories compose in registration order. Same-module companion
