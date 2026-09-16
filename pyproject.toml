@@ -1,0 +1,62 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "megatron-musa-patch"
+# Version tracks the Megatron-LM release this patch set targets, so that
+# "megatron-musa-patch 0.16.1" reads unambiguously as "the patches for
+# Megatron 0.16.1".  PEP 440 ordering then does the rest:
+#   0.16.1.dev0  <- this development branch
+#   0.16.1       <- release cut from it
+#   0.16.1.post1 <- fix on top of that release
+version = "0.16.1.dev0"
+description = "Minimal, reversible monkey-patches that let upstream Megatron-LM run on Moore Threads MUSA GPUs"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { file = "LICENSE" }
+authors = [{ name = "MUSA Megatron maintainers" }]
+keywords = ["megatron", "musa", "torch_musa", "moore-threads", "monkey-patch"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "Programming Language :: Python :: 3",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+# torchada is Moore Threads' CUDA->MUSA adapter and provides the whole
+# `torch.cuda.*` alias layer; this package only adds the Megatron-specific
+# overrides on top.  It is imported lazily (when Megatron is first imported),
+# never at `import torch` time, so it stays off the critical path for every
+# other process in the environment.  torch / torch_musa / megatron-core come
+# from the host environment.
+dependencies = ["torchada>=0.1.86"]
+
+[project.optional-dependencies]
+dev = ["pytest>=7", "pytest-cov"]
+
+[project.urls]
+Homepage = "https://github.com/kiscad/megatron-musa-patch"
+Repository = "https://github.com/kiscad/megatron-musa-patch"
+Issues = "https://github.com/kiscad/megatron-musa-patch/issues"
+
+# PyTorch's official out-of-tree device-backend autoload hook.  It fires at the
+# very end of `import torch`, i.e. before any Megatron module can be imported,
+# which is exactly the window we need.  Disable with
+#   TORCH_DEVICE_BACKEND_AUTOLOAD=0   (torch's own kill switch)
+#   MEGATRON_MUSA_PATCH_AUTOLOAD=0    (ours, keeps `import megatron_musa_patch` working)
+[project.entry-points."torch.backends"]
+megatron_musa_patch = "megatron_musa_patch:_torch_backend_autoload"
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+markers = [
+    "integration: needs MEGATRON_MUSA_RUN_INTEGRATION=1 and a working MUSA stack",
+]
