@@ -19,6 +19,7 @@ from . import (
     _device_arch,
     _distributed,
     _torch_backend,
+    _transformer_engine,
 )
 
 __all__ = ["PATCHES", "MODULES"]
@@ -30,6 +31,7 @@ MODULES = (
     _torch_backend,
     _device_arch,
     _distributed,
+    _transformer_engine,
 )
 
 #: Same-target factories compose in registration order. Same-module companion
