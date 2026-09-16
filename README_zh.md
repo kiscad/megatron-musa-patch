@@ -1,0 +1,215 @@
+# megatron-musa-patch（中文速览）
+
+项目目标是让 **Megatron-LM / Megatron-Core 在 MUSA 平台上无缝运行**：上游仓库的单元测试和训练脚本无需修改即可直接运行，**ms-swift 等上层框架调用 Megatron-Core 接口时无需区分 MUSA / CUDA**。
+
+运行时适配由本仓库承担。在受支持的 MUSA 环境安装本包后，调用方应继续使用原有代码，无需 MUSA 分支、额外 import、替代模型类或设备判断。这是项目的验收目标，不代表当前所有上游测试与训练配置都已通过。
+
+## 兼容性契约与当前覆盖
+
+| 使用场景 | 验收目标 |
+|---|---|
+| Megatron-LM 单元测试 | 原始测试及断言直接运行，包括其中的 CUDA API 写法和 `nccl` 配置。兼容问题在本包修复，不通过改写或跳过测试掩盖 MUSA 故障。 |
+| Megatron-LM 训练 | 原始 Python 和 shell 训练脚本无需源码修改，也不依赖专用 MUSA 启动器；保持模型、优化器、分布式和 checkpoint 语义。 |
+| ms-swift 等 Megatron-Core 调用方 | 保持 import 路径、公开签名、配置对象、输出和 state dict 契约。只安装 `megatron-core` wheel 时也必须具备 core 兼容能力，不能依赖 `megatron.training`。 |
+
+安装 MUSA 依赖、通过启动器已有入口设置数据路径、输出目录、卡数和适合资源的模型规模，属于环境配置。要求调用方把 `cuda` 改成 `musa`、把 `nccl` 改成 `mccl`、添加 `import megatron_musa_patch` 或关闭原本要求的功能，属于兼容缺口；这些做法可用于定位问题，但不满足调用方无需修改的目标。
+
+当前实现优先保证正确性，在必要处使用 PyTorch 归一化、同步 DP 规约、进程内 checkpoint bucket 写入等保守回退，并提供 TE/FP8、融合 RoPE 等专项检查。这些检查与示例只覆盖具体路径，不能据此宣称上游全量测试、原始训练脚本或 ms-swift 端到端已经全部兼容。尚存失败、跳过项及必需的参数覆盖都要明确记录。性能优化应在正确性验证后推进，并保持同一调用契约；回退代价及移除条件必须在 patch ledger 中可追溯。
+
+开发机制见[贡献指南](CONTRIBUTING_zh.md)；后续 coding agent 从 [AGENTS.md](AGENTS.md) 开始，按其中的流程实施和验收。[English](README.md)。
+
+## 快速上手
+
+```bash
+git clone https://github.com/kiscad/megatron-musa-patch
+cd megatron-musa-patch && git checkout v0.16.1-dev
+pip install .
+
+cd /path/to/Megatron-LM
+torchrun --nproc_per_node=8 pretrain_gpt.py \
+    ...其余参数照旧...
+```
+
+`torch.backends` entry point 会在 `import torch` 结束时激活补丁集，`sys.meta_path` watcher 在目标模块一出现时使补丁生效。上面的命令表示沿用原有参数，实际配置仍需按下文的覆盖范围和取舍验证。激活必须发生在 Megatron 使用 CUDA API 之前；默认通道应在无需调用方改动的情况下满足这一时序。晚激活只能修复受支持的模块级别名，不能修复已经创建好的对象。
+
+查看已注册的 patch（含根因、策略与移除条件）：
+
+```bash
+python -c "import megatron_musa_patch as m, json; print(json.dumps(m.report(), indent=2))"
+```
+
+新进程中的报告是惰性的：目标模块尚未导入时出现 `pending` 属正常现象。若要在诊断进程中主动解析目标，可先调用 `m.apply()` 再调用 `m.report()`；这不能替代原始调用方所使用的自动激活验收。
+
+`examples/run_pretrain_smoke.sh` 是 2 卡 5 步的端到端自检：
+
+```bash
+MEGATRON_LM_PATH=/path/to/Megatron-LM NPUS=2 PYTHON=/path/to/venv/bin/python \
+    bash examples/run_pretrain_smoke.sh
+```
+
+`examples/train_llama3_8b_musa.sh` 把上游 llama3-8b H100 FP8 示例适配到 MUSA
+（默认经 MT-TransformerEngine 走 FP8 + RMSNorm；设 `DTYPE=bf16` 则用纯 PyTorch
+local 实现；48GB 卡默认 TP=2；并缩减了默认 mock 训练计划）。完整的改动清单和
+短程联调用的环境变量覆盖见脚本头部注释。
+
+```bash
+MEGATRON_LM_PATH=/path/to/Megatron-LM PYTHON=/path/to/venv/bin/python \
+    bash examples/train_llama3_8b_musa.sh
+```
+
+这些示例使用了特定参数，用于诊断，不能证明所有原始上游启动器均可不修改运行。`run_pretrain_smoke.sh` 会重建 `OUTPUT_DIR`，应指定专用临时目录。上游测试、训练及框架调用的分步验收方法见 [AGENTS.md](AGENTS.md)。
+
+## 需要哪种 Megatron？
+
+任何能 import 到 `megatron` 包的安装方式都可以：
+
+```bash
+# a) Megatron-LM 源码 —— 推荐：还有 megatron.training 可用
+git clone https://github.com/NVIDIA/Megatron-LM
+git -C Megatron-LM checkout core_v0.16.1
+export PYTHONPATH=/path/to/Megatron-LM
+
+# b) 只装 pip wheel —— 只有 megatron.core，通常由上层训练框架带入
+pip install megatron-core==0.16.1
+```
+
+方式 b) 是上层框架消费 [Megatron-Core](https://pypi.org/project/megatron-core/) 时的典型场景——例如 **ms-swift** 的 Megatron 训练（要求 `megatron-core>=0.16`）或 **Megatron Bridge 0.1–0.3**（对应 Megatron-Core 0.14–0.16）。此时只有 `megatron.core` / `torch` 侧的 patch 会生效；`megatron.training` / `megatron.legacy` 的 patch 会被记录为 `skipped`，属预期行为。**Megatron Bridge ≥ 0.4 需要 Megatron-Core 0.17+**，超出本包支持范围。
+
+本包刻意不把 Megatron 声明成 pip 依赖：wheel 只含 `megatron/core/`，PyPI 上也没有 `megatron-lm`，而真实用法需要锁定到某个 tag 的源码 checkout。支持的上游范围：`>=0.14,<0.17`——超出会告警（设 `MEGATRON_MUSA_PATCH_STRICT=1` 则报错）。
+
+## 保守调试参数
+
+以下参数用于选择保守的 PyTorch 路径以缩小故障范围，是可选调试手段，不是兼容性契约，也不应成为下游必须编码的前提。若原始配置只有添加这些参数才能运行，仍需将原始失败记录为待修复缺口：
+
+```
+--transformer-impl local
+--no-masked-softmax-fusion --no-gradient-accumulation-fusion
+--no-bias-swiglu-fusion --no-bias-dropout-fusion --no-rope-fusion
+--attention-softmax-in-fp32 --accumulate-allreduce-grads-in-fp32
+--distributed-backend nccl        # torchada 会自动改写成 mccl
+CUDA_DEVICE_MAX_CONNECTIONS=1
+```
+
+`--no-rope-fusion` 不再是启动的必要条件：MUSA 上融合 rotary embedding 由 apex 的 kernel 提供（见下表 rope 相关行）；`tests/test_rope.py` 中需显式开启的硬件用例会将融合的 `sbhd`/`thd` 结果与 Megatron 的非融合参考实现比对。若仍想走纯 PyTorch 路径，可以继续保留该参数——`rotary_interleaved` 模型和 context parallel 下的 packed 序列会自动回退到该路径，并打印一次告警。
+
+## 改了什么
+
+MUSA 版 PyTorch 完全没有 `_cuda_*` 绑定，`torch.cuda` 是空壳，而 Megatron 到处引用它。[torchada](https://pypi.org/project/torchada/)（摩尔线程自己的 CUDA→MUSA 适配层）负责机械翻译；本包在其之上补 4 个 Megatron 专用覆盖，外加下面的 Megatron patch。实时、机器可读的清单（`id`、`rationale`、`strategy`、`upstream`、`remove_when`）是 `megatron_musa_patch.report()`。
+
+| id | 目标 | 根因（简述） |
+|---|---|---|
+| `torch.cuda.compat-layer` | `torch.cuda` | MUSA 版没有 CUDA 绑定；torchada + 4 个覆盖：`is_available()` 实时探测、`Tensor.type()` CUDA 名字、`CUDAGraph` 别名、tensor 子类（如 TE `Float8Tensor`）的 `.musa()` 迁移修复 |
+| `torch.cuda.device-capability.nvidia-scale` | `torch.cuda.get_device_capability` | Megatron 拿 capability 和 NVIDIA 阈值比较（≥8 的 grouped-GEMM 门）；上报合成的 `8.3` |
+| `megatron.training.get-device-arch-version.nvidia-scale` | `megatron.training.utils:get_device_arch_version` | 同类比较，走 `device_properties().major` |
+| `torch.distributed.clean-teardown` | `atexit` | 带着存活的 MCCL 进程组退出的运行出现过 watchdog 报错；退出时尽力 `destroy_process_group()` |
+| `megatron.fusions.fused-layer-norm.pure-torch` | `fused_layer_norm:FusedLayerNorm` | apex 能 import 但其 CUDA 扩展不可用；按 config 权威选择的纯 PyTorch LayerNorm/RMSNorm 回退 |
+| `megatron.fusions.fused-layer-norm.have-apex-flag` | `fused_layer_norm:HAVE_FUSED_LAYER_NORM` | 消费方按该 flag 分支；类被替换后保持其语义为真 |
+| `megatron.fusions.persist-layer-norm.disable` | `fused_layer_norm:HAVE_PERSIST_LAYER_NORM` | 回退实现不会执行 apex 的 persistent kernel |
+| `megatron.transformer-block.layer-norm.impl-local` | `transformer_block:LayerNormImpl` | 受影响的 MUSA 栈上 TE 的 norm 算子在 `allocateSpace` 处 abort，即使是 `local` spec |
+| `megatron.te.layer-norm-linear.unfused` | `transformer_engine:TELayerNormColumnParallelLinear` | 仅对 LayerNorm 用 PyTorch norm + TE Linear 绕过 QKV/FC1 内融合 norm 的 `allocateSpace` 错误，保留 FP8 Linear 和 norm checkpoint 参数名 |
+| `megatron.core.utils.te-version-check.ignore` | `core.utils:is_te_min_version` | MUSA 的 Transformer Engine 开发版本不遵循 NVIDIA TE 的发布版本编号；忽略上游最低版本阈值，但保留可导入性检查 |
+| `megatron.te.cpu-offload-context.signature-dispatch` | `transformer_engine:get_cpu_offload_context` | 每次构建 `TransformerBlock` 都会调用 TE 的 CPU-offload helper；上面的版本策略选中了六参数（TE ≥ 2.5）调用，而 MUSA fork 只接受五参数，导致模型还没建好就报错；改为按已安装函数自身的签名分发 |
+| `megatron.embeddings.fused-rope.apex` | `rope_utils:fused_apply_rotary_pos_emb` | Megatron 的融合 `sbhd` kernel 依赖 MUSA TE 树中并不存在的 `…attention.rope` 导入，导致 argparse 默认的 `apply_rope_fusion` 在第一步之前就被拒绝；改为绑定 apex 的等价 kernel |
+| `megatron.embeddings.fused-rope-thd.apex` | `rope_utils:fused_apply_rotary_pos_emb_thd` | 同一处缺失导入的 packed（`thd`）部分；使用 apex 的 padded 布局 kernel，`cp_size=1` |
+| `megatron.embeddings.rope-fusion.unfused-fallback` | `rope_utils:apply_rotary_pos_emb` | apex 没有 interleaved 和 context parallel 变体；仅把这类调用降级到上游的非融合分支（告警一次），而不是在训练中途报错 |
+| `megatron.legacy.fused-kernels.load.noop` | `legacy.fused_kernels:load` | 该 loader 探测 `nvcc`/定义扩展构建入口——没有 MUSA 构建路径 |
+| `megatron.training.set-jit-fusion-options.noop`（含 `initialize` 别名） | `set_jit_fusion_options` | 启动期 CUDA 预热/编译路径需先在 MUSA 上验证；验证前跳过 |
+| `megatron.dist-ckpt.no-fork-writer` | `FileSystemWriterAsync.write_preloaded_data_multiproc` | MUSA 初始化后 fork 的 bucket worker 在 `torch.save` 中段错误并卡死父进程；改为当前进程内顺序写同样的 bucket |
+| `megatron.training.overlap-flags.noop` | `training.arguments:validate_args` | 观测到的 TE fused-wgrad/DDP 组合会让 `param.grad` 为 None，破坏 Megatron overlap 反向 hook；DP-overlap 开关被强制关闭并告警 |
+| `megatron.training.profile.pytorch` | `training.arguments:validate_args` | 裸 `--profile` 会走 `cudaProfilerStart/Stop`/NVTX，MUSA 运行时不提供；改为自动启用 `--use-pytorch-profiler` |
+| `megatron.training.start-time.integer-microseconds` | `training:torch` | 仅在 MCCL 上将启动时间 MIN 归约转换为整数微秒 |
+| `megatron.training.checkpoint.host-barrier-proxy` / `host-barrier-context` | `checkpointing:torch` / `save_checkpoint` | checkpoint I/O 前创建全局 Gloo 组，仅将保存屏障切换到该组 |
+| `megatron.serialization.signal-member-globals` | `safe_globals:SAFE_GLOBALS` | 注册信号成员别名，支持 Python 3.10 weights-only 参数加载 |
+
+每个 patch 记录 `rationale`（观测到的根因，限定于具体版本，不夸大未验证的结论）、`strategy`（替换实现做了什么、保留了什么）、对应的上游文件，以及绑定到具体测试的 `remove_when` 复审条件。`uninstall()`/`unapply()` 会还原本包拥有的改动；有外部副作用的 hook（如 torchada import 期的全局变更）会如实标注为不可逆。
+
+**已退役：** `megatron.training.ckpt-format.no-torch-dist`（静默把 `--ckpt-format torch_dist` 改写为 `torch`）已移除。该改写改变了保存/加载语义——`torch` 是 Megatron 的 legacy 格式，不是 `torch.distributed.checkpoint` 的等价后端，改写还会破坏异步保存和 FSDP 配置。如需 legacy writer，请显式传 `--ckpt-format torch`。
+
+### 需要知道的取舍
+
+* `torch.cuda.is_available()` 是对 MUSA 的实时探测，不是常量——但上游有几处把它当作「是不是 NVIDIA」的探针（例如 FP8 checkpoint 路径用它决定是否 import TransformerEngine）；要开 FP8 checkpoint 请先复核这几处。
+* checkpoint bucket 写入在进程内串行（吞吐换稳定，不改格式）。如果你的 MUSA 版本可以 fork-after-init，设 `MEGATRON_MUSA_PATCH_CKPT_FORK=1` 恢复上游的 fork 式 writer。Megatron 外层的异步保存路径（`async_utils.DynamicAsyncCaller`）仍会独立 fork，不受本 patch 影响。
+* DP-overlap 开关（`--overlap-grad-reduce` / `--overlap-param-gather`）被 fused-wgrad/DDP 集成策略关闭，可能降低吞吐。`MEGATRON_MUSA_PATCH_DP_OVERLAP=1` 可恢复上游行为用于测试（旧写法 `MEGATRON_MUSA_PATCH_TP_OVERLAP` 仍有效）。`tp_comm_overlap` 不受影响。
+* 单独的 `--profile` 会自动启用 `--use-pytorch-profiler`，并在 rank 0 打印警告。用 `MEGATRON_MUSA_PATCH_DISABLE` 跳过 `megatron.training.profile.pytorch` 可恢复上游 profiler 选择。
+* rope 融合是 MUSA 上的 kernel 选择，而非上游默认实现：融合 kernel 来自摩尔线程的 apex，且只融合 apex 实现了的组合。`rotary_interleaved` 模型以及 context parallel 下的 packed 序列会降级到 Megatron 的非融合 rotary embedding，并打印一次告警——结果正确、速度较慢，但不再直接报错。`MEGATRON_MUSA_PATCH_ROPE_FUSION=0` 可完全拒绝该回退，此时上游的 `apply_rope_fusion is not available` 报错依旧存在（需自行加 `--no-rope-fusion`）。
+
+### 补丁独立性
+
+尽量独立选择补丁；local norm 的两个标志位需要
+`megatron.fusions.fused-layer-norm.pure-torch`，checkpoint 的 `host-barrier-context`
+需要 `host-barrier-proxy`。这些同模块协作关系通过 `report()[...]["requires"]` 显式报告；
+前置补丁缺失、禁用或主动退出时，消费者记录带原因的 `skipped`，不会隐式启用前置补丁。
+block norm 在 local class 补丁禁用时自行构造回退。RoPE dispatcher 在调用时检查实际 kernel，
+使用私有配置副本；没有 apex kernel 时只透传。完整边界见[补丁独立性检查记录](docs/PATCH_INDEPENDENCE.md)。
+
+## 手动生效
+
+三个通道都幂等。自动激活和显式 import 注册 watcher，不主动导入 Megatron，但会处理已经加载的模块；`apply()` 则主动导入目标并立即应用补丁。显式激活用于诊断和扩展，调用方无需修改的验收必须覆盖自动通道：
+
+| 通道 | 触发点 | 关闭开关 |
+|---|---|---|
+| `torch.backends` entry point（默认） | `import torch` 结尾 | `TORCH_DEVICE_BACKEND_AUTOLOAD=0` 或 `MEGATRON_MUSA_PATCH_AUTOLOAD=0` |
+| `import megatron_musa_patch` | 显式 import | `MEGATRON_MUSA_PATCH=0` |
+| `megatron_musa_patch.apply()` | 显式、立即 | `MEGATRON_MUSA_PATCH=0` |
+
+### 从上游源码迁移的修改
+
+启动时间同步、checkpoint 主机屏障和信号别名注册现位于 `patches/_control_collectives.py`，无需修改 Megatron 源码。torch 代理仅绑定到两个 Megatron 模块，其他通信调用直接透传。Gloo 组按 distributed world 身份缓存，由正常进程组销毁流程清理；禁用任意一个 checkpoint patch 都不会启用屏障重定向。safe-globals patch 扩展待注册列表；PyTorch 已注册的别名在卸载后仍保留，与上游注册生命周期一致。
+
+原先修改过的 H100 FP8 示例迁移为启动器，保留 16 层及缩减后的训练样本计划：
+
+```bash
+MEGATRON_LM_PATH=/path/to/Megatron-LM PYTHON=/path/to/venv/bin/python \
+    bash examples/train_llama3_8b_h100_fp8.sh
+```
+
+启动器执行未修改的上游脚本，通过命令行覆盖 `NUM_LAYERS`、`TRAIN_SAMPLES`、`LR_DECAY_SAMPLES`、`LR_WARMUP_SAMPLES`，这些只是示例默认值，不会更改其他训练任务的参数。
+
+## 环境变量开关
+
+| 变量 | 默认 | 含义 |
+|---|---|---|
+| `MEGATRON_MUSA_PATCH` | `1` | 总开关。`0` 同时关闭自动通道和 `import megatron_musa_patch`。 |
+| `MEGATRON_MUSA_PATCH_AUTOLOAD` | `1` | 只关自动（entry point）通道。 |
+| `MEGATRON_MUSA_PATCH_DISABLE` | 空 | 逗号分隔的 patch id，跳过这些 patch。 |
+| `MEGATRON_MUSA_PATCH_ONLY` | 空 | 白名单，优先级高于 `..._DISABLE`；未知 id 会告警。 |
+| `MEGATRON_MUSA_PATCH_STRICT` | `0` | 上游版本超出支持范围时报错而不是警告。 |
+| `MEGATRON_MUSA_PATCH_DEBUG` | `0` | 以 INFO 级别打印每个已生效的 patch。 |
+| `MEGATRON_MUSA_PATCH_ARCH` | `8.3` | 合成的 NVIDIA 架构号，例如 `9.0`。 |
+| `MEGATRON_MUSA_PATCH_BLOCK_LAYERNORM` | `local` | 设为 `upstream` 则保留 `LayerNormImpl = TENorm`。 |
+| `MEGATRON_MUSA_PATCH_TE_FUSED_LAYERNORM` | `0` | 设为 `1` 恢复上游 TE 融合 norm-linear，供升级验证。 |
+| `MEGATRON_MUSA_PATCH_ROPE_FUSION` | `1` | 设为 `0` 拒绝 apex 融合 RoPE 回退，上游会继续报告 `apply_rope_fusion` 不可用。 |
+| `MEGATRON_MUSA_PATCH_JIT_WARMUP` | `0` | 设为 `1` 保留上游的 JIT 预热。 |
+| `MEGATRON_MUSA_PATCH_CKPT_FORK` | `0` | 设为 `1` 保留上游的 fork 式 checkpoint writer。 |
+| `MEGATRON_MUSA_PATCH_DP_OVERLAP` | `0` | 设为 `1` 恢复 DP-overlap 开关（旧写法 `MEGATRON_MUSA_PATCH_TP_OVERLAP` 在本变量未设置时生效）。 |
+| `MEGATRON_MUSA_PATCH_TEARDOWN` | `1` | 设为 `0` 跳过进程组清理钩子。 |
+
+独立 norm 和 block norm patch 覆盖不到 TE `LayerNormLinear` 内部的归一化。RMSNorm 直接构造上游 TE 融合模块，保留原生前向/反向路径，不增加运行时封装。norm-linear 回退仅对 LayerNorm 生效，覆盖使用 `TELayerNormColumnParallelLinear` 的 Megatron spec，包括 GPT 的 QKV、FC1，保留 `layer_norm_weight`/`layer_norm_bias` 及其副本式 checkpoint 分片。FP8 量化和 GEMM 仍由 TE 执行；取消融合会影响性能和数值舍入。直接使用 TE 模块或 TE operation fuser 不在此替换范围内。跨模块类型或 TE 版本的 FP8 extra-state 兼容性仍需 checkpoint 验证。
+
+运行 norm-linear CPU 与单卡/双卡 MUSA 回归测试：
+
+```bash
+MEGATRON_MUSA_RUN_INTEGRATION=1 MEGATRON_LM_PATH=/path/to/Megatron-LM \
+    python -m pytest tests/test_te_layer_norm.py -q
+```
+
+## 排障
+
+* **`PatchTargetMissing`** —— 上游改名或删掉了符号；报错里有 patch id、符号和检测到的 Megatron 版本。用 `MEGATRON_MUSA_PATCH_DISABLE=<id>` 跳过，或更新目标（见[贡献指南](CONTRIBUTING_zh.md#6-如何新增一个-patch)）。
+* **训练仍然找不到 CUDA** —— 先确认激活状态：`python -c "import megatron_musa_patch as m, json; print(json.dumps(m.report(), indent=2))"`。全部 `pending` → 没 import 过 Megatron；报告为空 → 设了 `MEGATRON_MUSA_PATCH=0`，或 entry point 没装上：`python -c "from importlib.metadata import entry_points; print(entry_points(group='torch.backends'))"`。
+* **某个 patch 帮了倒忙** —— 用 `MEGATRON_MUSA_PATCH_DISABLE=<id>` 逐个定位，或 `MEGATRON_MUSA_PATCH=0` 整体关掉。`MEGATRON_MUSA_PATCH_DEBUG=1` 会打印每个 patch 的落地过程。
+
+## 版本约定
+
+包版本跟随所 patch 的 Megatron-LM 版本：本分支（`v0.16.1-dev`）上是 `0.16.1.dev0`，切发布版为 `0.16.1`，其上的修复为 `0.16.1.post1`，下一次跟进上游在新分支 `v0.16.2-dev` 上为 `0.16.2.dev0`。
+
+## 已验证组合
+
+以下是已有文档记录的参考环境，不是完整测试矩阵。声明的上游范围（`>=0.14,<0.17`）只是版本守卫，不能证明所有版本、功能或框架均已通过。每次验证都应记录实际 revision、命令、通过/失败/跳过数量及未测路径。
+
+Python 3.10 · PyTorch 2.7.1a0（MUSA 版）· torch_musa 2.7.1 · torchada 0.1.86 · Megatron-LM `core_v0.16.1`（megatron-core 0.16.1）· MT-TransformerEngine 2.0.0 · apex（MT fork，融合 RoPE）· MTT S5000。
+
+## License
+
+`LICENSE` 文件沿用 Megatron-LM 的上游条款：主体为 NVIDIA 的 BSD 式许可，内嵌的
+Apache-2.0 文本仅适用于其中包含的第三方代码。本仓库继承该文件及其条款。
