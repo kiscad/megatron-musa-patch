@@ -36,7 +36,16 @@ def test_targets_and_hooks_have_explicit_scope():
             assert ":" in patch.target
             assert patch.rebind_prefixes == ("megatron",)
         else:
-            assert patch.trigger == "megatron"
+            # transformer_engine is the one sanctioned exception: MT-TE's
+            # import-time factory shim breaks eager torch.jit.script before
+            # any Megatron import (ms-swift's zigzag_ring_attn), so the guard
+            # must activate at the TE boundary.
+            early_ids = {
+                "megatron.te.factory-shim.torchscript-compat",
+                "megatron.te.utils-module.safe-seed",
+            }
+            expected = "transformer_engine" if patch.id in early_ids else "megatron"
+            assert patch.trigger == expected
             assert callable(patch.undo), f"{patch.id} must clean up owned changes"
 
 

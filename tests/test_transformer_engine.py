@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from unittest.mock import Mock
 
+import pytest
+
+from megatron_musa_patch import _compat
 from megatron_musa_patch.patches import _transformer_engine
 
 
@@ -223,3 +227,253 @@ def test_quantized_init_context_and_ownership(monkeypatch):
         assert not _transformer_engine._install_quantized_model_init()
     finally:
         _transformer_engine._uninstall_quantized_model_init()
+
+
+def test_jit_script_compat_round_trip(monkeypatch):
+    """Scripting resolves the builtin while eager shims stay installed."""
+    import torch
+
+    calls = []
+    # The ATen builtin, independent of whether the vendor shim currently
+    # owns torch.arange (suite order may import transformer_engine first).
+    builtin = torch._C._VariableFunctions.arange
+
+    def make_wrapper():
+        # Vendor pattern: the builtin is captured under ``original_<attr>``.
+        original_arange = builtin
+
+        def patched_arange(*args, **kwargs):
+            calls.append(args)
+            return original_arange(*args, **kwargs)
+
+        return patched_arange
+
+    def scripted_probe(n: int):
+        return torch.arange(n) + 1
+
+    wrapper = make_wrapper()
+    wrapper.__module__ = "transformer_engine.musa"
+    previous = torch.arange
+    monkeypatch.setattr(torch, "arange", wrapper)
+    script_before = torch.jit.script
+    try:
+        assert _transformer_engine._install_jit_script_compat() is True
+        assert torch.jit.script is not script_before
+        assert torch.jit.script(scripted_probe)(3).tolist() == [1, 2, 3]
+        # The scripted graph called the builtin; the eager wrapper stayed installed.
+        assert calls == []
+        assert torch.arange is wrapper
+
+        assert _transformer_engine._install_jit_script_compat() is False
+        _transformer_engine._uninstall_jit_script_compat()
+        assert torch.jit.script is script_before
+        # The vendor wrapper owns eager calls again after undo.
+        assert torch.arange is wrapper
+        assert torch.arange(3).tolist() == [0, 1, 2]
+        assert calls[-1] == (3,)
+    finally:
+        _transformer_engine._uninstall_jit_script_compat()
+        torch.arange = previous
+
+
+def test_factory_shim_compat_end_to_end_subprocess():
+    """With auto-activation, eager torch.jit.script over factories survives TE."""
+    pytest.importorskip("torch_musa")
+    if not __import__("torch").musa.is_available():
+        pytest.skip("no visible MUSA device")
+    import subprocess
+    import sys
+    import os
+
+    root = Path(__file__).resolve().parents[1]
+    env = dict(
+        os.environ,
+        TORCH_DEVICE_BACKEND_AUTOLOAD="1",
+        MEGATRON_MUSA_PATCH="1",
+        MEGATRON_MUSA_PATCH_AUTOLOAD="1",
+        OMP_NUM_THREADS="1",
+    )
+    env.pop("MEGATRON_MUSA_PATCH_DISABLE", None)
+    env.pop("MEGATRON_MUSA_PATCH_ONLY", None)
+    code = (
+        "import torch, transformer_engine\n"
+        "from megatron_musa_patch import report\n"
+        "def scripted_probe(n: int, device: torch.device):\n"
+        "    # ms-swift's zigzag_ring_attn.get_half_lse shape: factory calls\n"
+        "    # inside an eager @torch.jit.script function.\n"
+        "    return torch.arange(n, device=device) + torch.empty(1, device=device)\n"
+        "ref = torch.randn(8, device='musa')\n"
+        "torch.jit.script(scripted_probe)(4, ref.device)\n"
+        "x = torch.empty(4, device='cuda')\n"
+        "assert x.device.type == 'musa', x.device\n"
+        "statuses = {r['id']: r['status'] for r in report()}\n"
+        "assert statuses.get('megatron.te.factory-shim.torchscript-compat') == 'applied', statuses\n"
+        "print('FACTORY_SHIM_OK')\n"
+    )
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as tmp:
+        probe = Path(tmp) / "factory_shim_probe.py"
+        probe.write_text(code, encoding="utf-8")
+        result = subprocess.run(
+            [sys.executable, str(probe)], env=env, capture_output=True,
+            text=True, timeout=300, cwd=str(root))
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "FACTORY_SHIM_OK" in result.stdout
+
+
+def test_jit_uninstall_preserves_foreign_wrapper(monkeypatch):
+    import functools
+    import torch
+
+    before = torch.jit.script
+    try:
+        assert _transformer_engine._install_jit_script_compat()
+        owned = torch.jit.script
+
+        @functools.wraps(owned)
+        def foreign(*args, **kwargs):
+            return owned(*args, **kwargs)
+
+        monkeypatch.setattr(torch.jit, 'script', foreign)
+        _transformer_engine._uninstall_jit_script_compat()
+        assert torch.jit.script is foreign
+    finally:
+        _transformer_engine._uninstall_jit_script_compat()
+        torch.jit.script = before
+
+
+def test_jit_compile_keeps_eager_factory_binding(monkeypatch):
+    """An eager caller must never observe an untranslated factory during compile."""
+    import torch
+
+    original_arange = torch._C._VariableFunctions.arange
+
+    def patched_arange(*args, **kwargs):
+        return original_arange(*args, **kwargs)
+
+    patched_arange.__module__ = 'transformer_engine.musa'
+    monkeypatch.setattr(torch, 'arange', patched_arange)
+
+    from torch.jit import _builtins
+    table = _builtins._get_builtin_table()
+    table.pop(id(patched_arange), None)
+
+    def compiler(fn, *args, **kwargs):
+        assert table[id(patched_arange)] == 'aten::arange'
+        assert torch.arange is patched_arange
+        raise ValueError('compile error')
+
+    monkeypatch.setattr(torch.jit, 'script', compiler)
+    try:
+        assert _transformer_engine._install_jit_script_compat()
+        with pytest.raises(ValueError, match='compile error'):
+            torch.jit.script(lambda: None)
+        assert torch.arange is patched_arange
+        assert id(patched_arange) not in table
+    finally:
+        _transformer_engine._uninstall_jit_script_compat()
+
+
+@pytest.mark.parametrize('install', [
+    _transformer_engine._install_jit_script_compat,
+    _transformer_engine._install_safe_te_utils_module,
+])
+def test_early_te_hooks_decline_non_musa_fork(monkeypatch, install):
+    monkeypatch.setattr(_transformer_engine, '_te_fork_needs_mem_monitor', lambda: False)
+    try:
+        assert install() is False
+    finally:
+        _transformer_engine._uninstall_jit_script_compat()
+        _transformer_engine._uninstall_safe_te_utils_module()
+
+
+@pytest.mark.parametrize("foreign", [False, True])
+def test_safe_utils_lifecycle_preserves_module_ownership(monkeypatch, foreign):
+    import sys
+    import types
+
+    name = "transformer_engine.musa.pytorch.utils"
+    parent = types.ModuleType("transformer_engine.musa.pytorch")
+    monkeypatch.setitem(sys.modules, parent.__name__, parent)
+    monkeypatch.delitem(sys.modules, name, raising=False)
+    monkeypatch.setattr(_transformer_engine, "_utils_module_owned", None)
+    monkeypatch.setattr(_transformer_engine, "_te_fork_needs_mem_monitor", lambda: True)
+    try:
+        assert _transformer_engine._install_safe_te_utils_module()
+        owned = sys.modules[name]
+        parent.utils = owned
+        assert owned.__package__ == parent.__name__
+        assert owned.__spec__.name == name
+        original, replacement = object(), object()
+        target = types.SimpleNamespace(value=original)
+        owned.replace_attr(target, "value", replacement)
+        assert target.value is replacement and target._orig_value is original
+        assert not _transformer_engine._install_safe_te_utils_module()
+        if foreign:
+            other = types.ModuleType(name)
+            sys.modules[name] = parent.utils = other
+        _transformer_engine._uninstall_safe_te_utils_module()
+        if foreign:
+            assert sys.modules[name] is other and parent.utils is other
+        else:
+            assert name not in sys.modules and not hasattr(parent, "utils")
+    finally:
+        _transformer_engine._uninstall_safe_te_utils_module()
+
+
+def test_factory_shim_skips_when_vendor_shim_removed(monkeypatch):
+    """A TE build without factory wrappers no longer owns torch.jit.script."""
+    import torch
+
+    script_before = torch.jit.script
+    monkeypatch.setattr(_compat, "module_source_contains",
+                        lambda name, *m: False)
+    assert _transformer_engine._install_jit_script_compat() is False
+    assert torch.jit.script is script_before
+
+
+def test_factory_shim_installs_when_shim_marker_present(monkeypatch):
+    import torch
+
+    monkeypatch.setattr(_compat, "module_source_contains",
+                        lambda name, *m: True)
+    script_before = torch.jit.script
+    try:
+        assert _transformer_engine._install_jit_script_compat() is True
+        assert torch.jit.script is not script_before
+    finally:
+        _transformer_engine._uninstall_jit_script_compat()
+    assert torch.jit.script is script_before
+
+
+def test_safe_seed_skips_when_vendor_loop_fixed(monkeypatch):
+    """A repaired vendor utils module must not be shadowed by the replica."""
+    import sys
+
+    monkeypatch.setattr(_compat, "module_source_contains",
+                        lambda name, *m: False)
+    name = "transformer_engine.musa.pytorch.utils"
+    monkeypatch.delitem(sys.modules, name, raising=False)
+    monkeypatch.setattr(_transformer_engine, "_utils_module_owned", None)
+    monkeypatch.setattr(_transformer_engine, "_te_fork_needs_mem_monitor", lambda: True)
+    assert _transformer_engine._install_safe_te_utils_module() is False
+    assert name not in sys.modules
+
+
+def test_safe_seed_seeds_when_unsafe_loop_present(monkeypatch):
+    import sys
+
+    name = "transformer_engine.musa.pytorch.utils"
+    saved = sys.modules.pop(name, None)
+    monkeypatch.setattr(_transformer_engine, "_utils_module_owned", None,
+                        raising=False)
+    monkeypatch.setattr(_compat, "module_source_contains",
+                        lambda name_, *m: True)
+    try:
+        assert _transformer_engine._install_safe_te_utils_module() is True
+        assert name in sys.modules
+    finally:
+        _transformer_engine._uninstall_safe_te_utils_module()
+        if saved is not None:
+            sys.modules[name] = saved

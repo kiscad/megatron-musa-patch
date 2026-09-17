@@ -14,8 +14,11 @@ from __future__ import annotations
 
 import functools
 import logging
+from contextlib import contextmanager
+from threading import RLock
 from typing import Any
 
+from .. import _compat
 from .._engine import AttrPatch, HookPatch
 
 __all__ = ["PATCHES"]
@@ -87,6 +90,194 @@ def _uninstall_quantized_model_init() -> None:
         if getattr(module, "quantized_model_init", None) is replacement:
             del module.quantized_model_init
         _quantized_init_owned = None
+
+
+# Early TE hooks run before Megatron, but only for the installed MUSA fork.
+_jit_script_owned: tuple[Any, Any, Any] | None = None
+_jit_compile_lock = RLock()
+_FACTORY_NAMES = ("tensor", "zeros", "ones", "empty", "rand", "arange", "empty_like")
+
+
+@contextmanager
+def _script_factory_aliases(torch_module):
+    """Teach TorchScript the ATen identity of known MT-TE factory wrappers.
+
+    Never replace torch's eager bindings: another thread may allocate tensors
+    while compilation is in progress. Only the compiler's builtin table is
+    temporarily updated. This private PyTorch API is covered by the real
+    TorchScript regression and must be rechecked when upgrading PyTorch.
+    Device arguments in compiled graphs retain ATen semantics; this does not
+    add CUDA-string translation inside TorchScript graphs.
+    """
+    import types
+    from torch.jit import _builtins
+
+    missing = object()
+    with _jit_compile_lock:
+        try:
+            table = _builtins._get_builtin_table()
+        except Exception as exc:  # noqa: BLE001 - private API, torch-version bound
+            _compat.logger.info(
+                "factory-shim passthrough: torch.jit._builtins._get_builtin_table "
+                "unavailable in this torch build (%s: %s)", type(exc).__name__, exc)
+            yield
+            return
+        changed = []
+        try:
+            for name in _FACTORY_NAMES:
+                wrapper = getattr(torch_module, name, None)
+                if (type(wrapper) is not types.FunctionType
+                        or wrapper.__module__ != "transformer_engine.musa"):
+                    continue
+                closure = dict(zip(wrapper.__code__.co_freevars, wrapper.__closure__ or ()))
+                cell = closure.get(f"original_{name}")
+                if cell is None:
+                    continue
+                try:
+                    original = cell.cell_contents
+                except ValueError:  # Empty closure cell: not this vendor contract.
+                    continue
+                if original is not getattr(torch_module._C._VariableFunctions, name, None):
+                    continue
+                key = id(wrapper)
+                previous = table.get(key, missing)
+                op = f"aten::{name}"
+                if previous is not missing:
+                    # Respect an existing compiler mapping, including another owner.
+                    continue
+                changed.append((key, wrapper, op))  # Keep function identities alive.
+                table[key] = op
+            yield
+        finally:
+            for key, wrapper, op in reversed(changed):
+                if table.get(key) is op:
+                    del table[key]
+
+
+def _install_jit_script_compat() -> bool:
+    """Adapt scripting without temporarily disabling eager device translation."""
+    global _jit_script_owned
+    if _jit_script_owned is not None or not _te_fork_needs_mem_monitor():
+        return False
+    shimmed = _compat.module_source_contains(
+        "transformer_engine.musa", "torch.arange = patched_arange")
+    if shimmed is False:
+        # The installed TE no longer wraps factory functions: the alias guard
+        # would never register anything, so skip owning torch.jit.script.
+        _compat.logger.info(
+            "factory-shim skipped: transformer_engine.musa has no factory "
+            "wrappers (te=%s torch_musa=%s)",
+            _compat.te_version(), _compat.torch_musa_version())
+        return False
+    import inspect
+    import torch
+
+    original = torch.jit.script
+    signature = inspect.signature(original)
+
+    @functools.wraps(original)
+    def script(*args: Any, **kwargs: Any):
+        arguments = signature.bind(*args, **kwargs)
+        # Class scripting resolves names from the caller's frame. Account for
+        # this wrapper just as torch.jit.script accounts for its own frame.
+        if "_frames_up" in signature.parameters:
+            arguments.arguments["_frames_up"] = arguments.arguments.get("_frames_up", 0) + 1
+        with _script_factory_aliases(torch):
+            return original(*arguments.args, **arguments.kwargs)
+
+    torch.jit.script = script
+    _jit_script_owned = (torch.jit, original, script)
+    return True
+
+
+def _uninstall_jit_script_compat() -> None:
+    global _jit_script_owned
+    if _jit_script_owned is not None:
+        owner, original, replacement = _jit_script_owned
+        if owner.script is replacement:
+            owner.script = original
+        _jit_script_owned = None
+
+
+#: sys.modules entry this hook seeds for the vendor's unsafe utils module.
+_utils_module_owned: tuple[str, Any] | None = None
+
+
+def _install_safe_te_utils_module() -> bool:
+    """Seed a safe replica of ``transformer_engine.musa.pytorch.utils``.
+
+    The vendor module iterates ``sys.modules`` and getattr's every 'utils'
+    module at import time. With transformers 5.x lazy modules that getattr
+    triggers imports and crashes the whole TE import chain ("dictionary
+    changed size during iteration"). The functions TE actually consumes
+    (wrap_attr/replace_attr/add_attr) are trivial, so a replica without the
+    fragile loop is seeded before the vendor module executes. Refuses to
+    shadow an existing entry and removes only its own seeding on undo.
+    """
+    import sys
+    import types
+
+    global _utils_module_owned
+    name = "transformer_engine.musa.pytorch.utils"
+    if (name in sys.modules or _utils_module_owned is not None
+            or not _te_fork_needs_mem_monitor()):
+        return False
+    unsafe = _compat.module_source_contains(
+        "transformer_engine.musa.pytorch.utils",
+        "for k in sys.modules:", "getattr(sys.modules[k], target, None)")
+    if unsafe is False:
+        # The installed TE fixed the fragile loop: seeding would shadow the
+        # vendor's repaired module with this replica, so decline instead.
+        _compat.logger.info(
+            "safe-seed skipped: transformer_engine utils module no longer "
+            "iterates sys.modules (te=%s)", _compat.te_version())
+        return False
+
+    module = types.ModuleType(name)
+    module.__package__ = name.rpartition(".")[0]
+    from importlib.machinery import ModuleSpec
+    module.__spec__ = ModuleSpec(name, loader=None)
+
+    def wrap_name(src_name: str) -> str:
+        return f"_orig_{src_name}"
+
+    def add_attr(module_: Any, attr: str, target: Any) -> None:
+        setattr(module_, attr, target)
+
+    def wrap_attr(module_: Any, attr: str, wrapper: Any) -> None:
+        target = getattr(module_, attr)
+        setattr(module_, wrap_name(attr), target)
+        setattr(module_, attr, wrapper)
+
+    def replace_attr(module_: Any, attr: str, target: Any) -> None:
+        wrap_attr(module_, attr, target)
+
+    def musa_assert_dim_for_fp8_exec(*tensors: Any) -> None:
+        return None
+
+    module.wrap_name = wrap_name
+    module.add_attr = add_attr
+    module.wrap_attr = wrap_attr
+    module.replace_attr = replace_attr
+    module.musa_assert_dim_for_fp8_exec = musa_assert_dim_for_fp8_exec
+    sys.modules[name] = module
+    _utils_module_owned = (name, module)
+    return True
+
+
+def _uninstall_safe_te_utils_module() -> None:
+    import sys
+
+    global _utils_module_owned
+    if _utils_module_owned is not None:
+        name, module = _utils_module_owned
+        if sys.modules.get(name) is module:
+            del sys.modules[name]
+        parent_name, _, child = name.rpartition(".")
+        parent = sys.modules.get(parent_name)
+        if parent is not None and vars(parent).get(child) is module:
+            delattr(parent, child)
+        _utils_module_owned = None
 
 
 def _te_extension():
@@ -295,6 +486,80 @@ PATCHES = (
             "Remove when the MUSA TransformerEngine drops the external "
             "musa_patch import: disable this patch id and re-run the MoE/A2A "
             "grouped-linear forward cases; delete only if they pass without it."
+        ),
+    ),
+    HookPatch(
+        id="megatron.te.factory-shim.torchscript-compat",
+        trigger="transformer_engine",
+        run=_install_jit_script_compat,
+        undo=_uninstall_jit_script_compat,
+        rationale=(
+            "MT-TE's patch_after_import_torch rebinds torch.tensor/zeros/ones/"
+            "empty/rand/arange/empty_like to untyped ``*args, **kwargs`` "
+            "wrappers that translate device arguments. TorchScript then "
+            "rejects any eager ``torch.jit.script`` of a function calling one "
+            "of those factories with torch.jit.frontend.NotSupportedError; "
+            "ms-swift hits this on ``import swift.megatron`` because "
+            "swift.model imports sequence_parallel/zigzag_ring_attn, whose "
+            "module-level @torch.jit.script compiles torch.arange calls "
+            "before Megatron is ever imported. The wrappers themselves are "
+            "load-bearing: swift, mcore-bridge and Megatron-Core pass eager "
+            "``device='cuda'`` strings to factory calls on the training path."
+        ),
+        strategy=(
+            "Only for the installed MUSA TE fork, own torch.jit.script at the "
+            "TE import boundary. During scripting, register the seven known "
+            "TE wrappers as their ATen builtins in TorchScript's compiler "
+            "table, serialize nested/concurrent registration and undo owned "
+            "entries even on compile failure. Eager torch factories are never "
+            "rebound, including during compilation. Preserve caller-frame "
+            "resolution and restore script only by exact identity on undo. "
+            "Scripted devices retain ATen semantics: use actual device "
+            "objects, not CUDA string literals expecting eager translation. "
+            "Declines when the installed TE no longer wraps factory "
+            "functions (source probe)."
+        ),
+        upstream="transformer_engine/musa/__init__.py:patch_after_import_torch",
+        remove_when=(
+            "Remove when MT-TE stops rebinding torch factory functions with "
+            "untyped wrappers or ships scriptable typed wrappers: disable this "
+            "patch id and re-run the standard swift.megatron import probe and "
+            "the transformer-engine-bug-tests Bug 3 probes; delete only if "
+            "both pass without it."
+        ),
+    ),
+    HookPatch(
+        id="megatron.te.utils-module.safe-seed",
+        trigger="transformer_engine",
+        run=_install_safe_te_utils_module,
+        undo=_uninstall_safe_te_utils_module,
+        rationale=(
+            "MT-TE's transformer_engine/musa/pytorch/utils.py iterates "
+            "sys.modules at import time and getattr's every module whose name "
+            "contains 'utils'. With transformers 5.x lazy modules that "
+            "getattr triggers submodule imports, mutating sys.modules during "
+            "iteration, and the whole TE import chain dies with 'dictionary "
+            "changed size during iteration' -- which breaks "
+            "``import swift.megatron`` after the transformers upgrade."
+        ),
+        strategy=(
+            "Only for the installed MUSA fork, before the vendor module executes, "
+            "seed sys.modules with a "
+            "replica exposing the functions TE consumes (wrap_attr, "
+            "replace_attr, add_attr, wrap_name, "
+            "musa_assert_dim_for_fp8_exec) without the fragile import-time "
+            "loop, so the vendor module body never runs. Same seeding "
+            "pattern as the musa_patch.mem_utils shim. Undo deletes the "
+            "entry only if this hook still owns it; refuses to shadow an "
+            "existing module. Declines when the vendor module no longer "
+            "contains the fragile loop (source probe)."
+        ),
+        upstream="transformer_engine/musa/pytorch/utils.py",
+        remove_when=(
+            "Remove when the MUSA TE stops iterating sys.modules at import "
+            "time: disable this patch id and re-run the standard "
+            "swift.megatron import probe with transformers 5.x; delete only "
+            "if it passes without it."
         ),
     ),
 )
