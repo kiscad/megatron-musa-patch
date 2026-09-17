@@ -112,18 +112,28 @@ def _fix_tensor_musa_for_subclasses(torch: Any) -> None:
     TransformerEngine FP8 Float8Tensor is one such subclass. Keep ordinary
     tensors on the original fast path and preserve transfer options on the
     subclass path. Remove this workaround when torch_musa fixes its C shim.
+
+    The same shim also re-enters this wrapper from inside a torch function
+    mode (e.g. ``with torch.device(...)``): the C implementation re-dispatches
+    ``Tensor.musa`` with the real tensor shifted into ``*args`` and a
+    non-Tensor placeholder in ``self``, so a naive ``type(self) is not Tensor``
+    check would treat the placeholder as a tensor subclass and pass it to
+    ``torch.device``.
     """
     original_musa = torch.Tensor.musa
+
+    def _resolve_musa_device(device):
+        if device is None:
+            return torch.device("musa")
+        if isinstance(device, int):
+            return torch.device("musa", device)
+        device = torch.device(device)
+        return device
 
     def _move_subclass(
         self, device=None, non_blocking=False, *, memory_format=torch.preserve_format
     ):
-        if device is None:
-            device = torch.device("musa")
-        elif isinstance(device, int):
-            device = torch.device("musa", device)
-        else:
-            device = torch.device(device)
+        device = _resolve_musa_device(device)
         if device.type != "musa":
             raise RuntimeError(f"Invalid device, must be musa device: {device}")
         return self.to(
@@ -134,7 +144,14 @@ def _fix_tensor_musa_for_subclasses(torch: Any) -> None:
     def _musa(self, *args, **kwargs):
         if type(self) is torch.Tensor:
             return original_musa(self, *args, **kwargs)
-        return _move_subclass(self, *args, **kwargs)
+        if isinstance(self, torch.Tensor):
+            return _move_subclass(self, *args, **kwargs)
+        # C-shim re-entry: the real tensor arrives as args[0] while ``self``
+        # is a non-Tensor placeholder. Route the tensor through the same
+        # subclass transfer path instead of treating it as a device argument.
+        if args and isinstance(args[0], torch.Tensor):
+            return _move_subclass(args[0], *args[1:], **kwargs)
+        return original_musa(self, *args, **kwargs)
 
     _set_attr(torch.Tensor, "musa", _musa)
 

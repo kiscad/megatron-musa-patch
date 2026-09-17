@@ -599,3 +599,56 @@ def test_torchada_rewrites_nccl_to_mccl(torch, tmp_path):
         assert dist.get_backend() == "mccl"
     finally:
         dist.destroy_process_group()
+
+
+def test_tensor_musa_inside_device_context(torch):
+    """P10: Megatron pins a CPU tensor and calls ``.cuda()`` under CP.
+
+    ``get_pos_emb_on_this_cp_rank`` runs ``torch.tensor(..., pin_memory=True)
+    .cuda(non_blocking=True)`` while a ``torch.device`` context is active. The
+    torch_musa C shim re-enters the Python-level ``Tensor.musa`` with shifted
+    arguments, which used to raise ``device() received an invalid combination
+    of arguments - got (Tensor)``.
+    """
+    x = torch.tensor([0, 7], device="cpu", pin_memory=True)
+    with torch.device("cuda"):
+        moved = x.cuda(non_blocking=True)
+    assert moved.device.type == "musa"
+    assert moved.tolist() == [0, 7]
+    assert x.device.type == "cpu"
+
+
+def test_tensor_musa_reentry_shifts_the_real_tensor_back(torch):
+    """The C shim re-enters with (placeholder-self, tensor, ...kwargs).
+
+    Route that call shape through the same transfer path as tensor subclasses
+    instead of feeding the placeholder to ``torch.device``.
+    """
+    x = torch.randn(3)
+    wrapper = torch.Tensor.musa
+    moved = wrapper(object(), x, non_blocking=True)
+    assert moved.device.type == "musa"
+    torch.testing.assert_close(moved.cpu(), x.to(torch.device("musa")).cpu())
+    # A real tensor in self keeps the existing dispatch.
+    assert wrapper(x, 0).device == torch.device("musa", 0)
+
+
+def test_tensor_musa_same_device_transfer_is_no_copy(torch):
+    a = torch.randn(4, device="musa")
+    assert a.musa().data_ptr() == a.data_ptr()
+
+
+def test_tensor_musa_accepts_musa_device_forms(torch):
+    x = torch.randn(3)
+    for device in (0, "musa:0", torch.device("musa"), None):
+        assert x.musa(device).device.type == "musa"
+
+
+def test_tensor_musa_subclass_accepts_cuda_spelling(torch):
+    class Subclass(torch.Tensor):
+        pass
+
+    tensor = torch.randn(3).as_subclass(Subclass)
+    moved = tensor.musa("cuda:0")
+    assert moved.device == torch.device("musa", 0)
+    assert isinstance(moved, Subclass)
