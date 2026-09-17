@@ -256,3 +256,24 @@ def test_musa_fused_rope_parity():
     )
     assert result.returncode == 0, result.stdout + result.stderr
     assert result.stdout.count("ROPE_PASS") == 8, result.stdout
+
+
+@pytest.mark.parametrize("packed", [False, True])
+@pytest.mark.parametrize("supports_interleaved", [False, True])
+def test_native_te_interleaved_version_guard(
+    engine, stub_module, packed, supports_interleaved
+):
+    calls = []
+    bshd, thd = Recorder("te-bshd"), Recorder("te-thd")
+    extension = stub_module("megatron.core.extensions.transformer_engine")
+    extension.fused_apply_rotary_pos_emb = bshd
+    extension.fused_apply_rotary_pos_emb_thd = thd
+    extension.is_te_min_version = lambda version: supports_interleaved
+    module = _dispatcher(engine, stub_module, calls=calls, bshd=bshd, thd=thd)
+    config = SimpleNamespace(apply_rope_fusion=True, rotary_interleaved=True)
+    module.apply_rotary_pos_emb(
+        object(), object(), config=config, cu_seqlens=object() if packed else None
+    )
+    assert calls == [supports_interleaved]
+    assert config.apply_rope_fusion is True
+    assert module.fused_apply_rotary_pos_emb is bshd

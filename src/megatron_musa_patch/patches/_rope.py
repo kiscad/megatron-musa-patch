@@ -227,13 +227,29 @@ def _unfused_where_apex_cannot_fuse(original: Any) -> Any:
                 apex_bshd=_is_apex_kernel(_bound_kernel("fused_apply_rotary_pos_emb")),
                 apex_thd=_is_apex_kernel(_bound_kernel("fused_apply_rotary_pos_emb_thd")),
             )
+        if (not reason and config.apply_rope_fusion
+                and getattr(config, "rotary_interleaved", False)):
+            # Core can expose a native TE wrapper even when TE < 2.3 rejects
+            # interleaved RoPE. Respect Core's real version guard, and only
+            # adapt its exact binding (never infer capabilities of a foreign one).
+            import sys
+
+            extension = sys.modules.get("megatron.core.extensions.transformer_engine")
+            name = ("fused_apply_rotary_pos_emb" if cu_seqlens is None
+                    else "fused_apply_rotary_pos_emb_thd")
+            kernel = _bound_kernel(name)
+            if (extension is not None and kernel is not None
+                    and kernel is vars(extension).get(name)):
+                version_check = vars(extension).get("is_te_min_version")
+                if callable(version_check) and not version_check("2.3.0"):
+                    reason = "interleaved"
         if not reason:
             return original(
                 t, freqs, config=config, cu_seqlens=cu_seqlens, mscale=mscale, cp_group=cp_group
             )
         _warn_once(
             reason,
-            "megatron-musa-patch: apex's fused RoPE cannot serve %s on MUSA; "
+            "megatron-musa-patch: the installed fused RoPE cannot serve %s on MUSA; "
             "using Megatron's unfused rotary embedding for those layers.",
             "rotary_interleaved models" if reason == "interleaved"
             else "packed sequences with context parallel > 1",
@@ -319,7 +335,9 @@ PATCHES = (
             "serve it, inspecting currently bound kernels at call time. For unsupported "
             "combinations pass a shallow config copy with apply_rope_fusion=False to "
             "upstream, warning once per reason without mutating shared config. "
-            "Native or missing kernels pass through, preserving upstream errors; "
+            "Core native TE wrappers that reject interleaved RoPE before TE 2.3 "
+            "also select the unfused route. Other native or missing kernels pass "
+            "through, preserving upstream errors; "
             "the dispatcher neither imports apex nor requires kernel patch ordering."
         ),
         upstream="NVIDIA/Megatron-LM megatron/core/models/common/embeddings/rope_utils.py",
