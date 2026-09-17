@@ -76,7 +76,6 @@ checkpoint writer → `_checkpointing.py`；控制面通信 → `_control_collec
 ```bash
 cd /path/to/megatron-musa-patch
 export MMP_ROOT="$PWD"
-export MMP_PYTHON=/path/to/venv/bin/python
 export MEGATRON_LM_PATH=/path/to/Megatron-LM
 export MMP_ARTIFACTS="$(mktemp -d /tmp/megatron-musa-validation.XXXXXX)"
 

@@ -107,13 +107,27 @@ MUSA 版 PyTorch 完全没有 `_cuda_*` 绑定，`torch.cuda` 是空壳，而 Me
 | `megatron.fusions.persist-layer-norm.disable` | `fused_layer_norm:HAVE_PERSIST_LAYER_NORM` | 回退实现不会执行 apex 的 persistent kernel |
 | `megatron.transformer-block.layer-norm.impl-local` | `transformer_block:LayerNormImpl` | 受影响的 MUSA 栈上 TE 的 norm 算子在 `allocateSpace` 处 abort，即使是 `local` spec |
 | `megatron.te.layer-norm-linear.unfused` | `transformer_engine:TELayerNormColumnParallelLinear` | 仅对 LayerNorm 用 PyTorch norm + TE Linear 绕过 QKV/FC1 内融合 norm 的 `allocateSpace` 错误，保留 FP8 Linear 和 norm checkpoint 参数名 |
-| `megatron.core.utils.te-version-check.ignore` | `core.utils:is_te_min_version` | MUSA 的 Transformer Engine 开发版本不遵循 NVIDIA TE 的发布版本编号；忽略上游最低版本阈值，但保留可导入性检查 |
-| `megatron.te.cpu-offload-context.signature-dispatch` | `transformer_engine:get_cpu_offload_context` | 每次构建 `TransformerBlock` 都会调用 TE 的 CPU-offload helper；上面的版本策略选中了六参数（TE ≥ 2.5）调用，而 MUSA fork 只接受五参数，导致模型还没建好就报错；改为按已安装函数自身的签名分发 |
+| `megatron.te.cpu-offload-context.signature-dispatch` | `transformer_engine:get_cpu_offload_context` | 每次构建 `TransformerBlock` 都会调用 TE 的 CPU-offload helper；当 fork 报告的版本号与真实签名不一致时会选中六参数（TE ≥ 2.5）调用而 fork 只接受五参数，模型还没建好就报错；改为按已安装函数自身的签名分发 |
+| `megatron.fsdp.premul-sum.device-prescale` | `fsdp...param_and_grad_buffer:gradient_reduce_preprocessing` | torch_musa/MCCL 没有实现 PREMUL_SUM；FSDP 梯度平均在该分支设备端 `mul_` 预缩放后改用 SUM，其余分支透传 |
+| `megatron.bridge-communicator.subgroups-backend` | `pipeline_parallel.bridge_communicator:dist` | `new_subgroups_by_enumeration` 在 c10d 内部调用 `new_group`，绕开 torchada 的 nccl→mccl 翻译；在模块局部代理中仅翻译确切的 `nccl` 请求 |
+| `megatron.hyper-comm-grid.subgroups-backend` | `hyper_comm_grid:dist` | 与 bridge communicator 相同的绕行路径；同一代理，仅翻译 `nccl` |
+| `megatron.te.grouped-linear.mem-monitor-compat` | `transformer_engine...grouped_linear.py` 的 `musa_patch` 导入 | MT-TE 硬依赖旧 `musa_patch.mem_utils.MemMonitor`；提供带 `max_token_num` 计数的最小 shim（拥有 sys.modules 条目，可撤销），不覆盖已有包 |
+| `megatron.moe.topk.fp64-reference` | `transformer.moe.moe_utils:torch` | MuDNN TopK 不支持 float64；moe_utils 的 torch 全局换成转发代理，仅对 FP64 topk 用 CPU 同精度求索引 + 设备端 gather |
+| `megatron.moe.permutation.unfused-musa` | `transformer.moe.moe_utils:permute` | TE 的 moe_permute 内核对 FP32/FP64 中止；仅在该组合降级到上游 `fused=False` 参考实现 |
+| `megatron.moe.unpermutation.unfused-musa` | `transformer.moe.moe_utils:unpermute` | 与 permute 成对降级，保证两端索引格式一致（requires 声明） |
+| `megatron.moe.grouped-gemm.torch-ops` | `transformer.moe.grouped_gemm_util:ops` | fanshiqing grouped_gemm 无 MUSA 构建；提供每专家 `torch.matmul` 的参考 `ops.gmm`（含 trans_b、空专家梯度），vendor 存在时拒绝 |
+| `megatron.moe.grouped-gemm.available-flag` | `grouped_gemm_util:grouped_gemm_is_available` | 回退安装后如实报告可用（requires torch-ops） |
+| `megatron.moe.grouped-gemm.assert-noop` | `grouped_gemm_util:assert_grouped_gemm_is_available` | GroupedMLP 构造断言改为查询被修补的可用性标志 |
+| `megatron.softmax.kernel-availability.musa` | `fused_softmax:FusedScaleMaskSoftmax.is_kernel_available` | 探测内部 import `scaled_masked_softmax_cuda` 会直接 ModuleNotFoundError；扩展缺失时返回 False 走 torch 回退 |
+| `megatron.te.norm.unfused-musa` | `transformer_engine:TENorm` | TE 独立 LayerNorm/RMSNorm 在 MUSA `allocateSpace` 中止；子类化 TE 模块仅替换 forward（functional norm，参数 cast 到输入 dtype），isinstance/分片契约保留 |
+| `megatron.te.attention.capability-dispatch` | `transformer_engine:TEDotProductAttention.forward` | 按内核能力分发、不实现 attention 数学：满足 flash 条件（FP16/BF16、head_dim 64–192、无 dropout）的输入走原生 MT-TE flash；其余符合条件的输入走 TE 自带的 UnfusedDotProductAttention 后端；padding THD 切成逐序列厂商调用（原生 THD 丢弃 `cu_seqlens` 会得到 NaN）。CP>1/FP8 DPA/特殊 softmax/window/max-logit 仍交上游。 |
+| `megatron.te.quantized-model-init.delayed-compat` | `transformer_engine.pytorch.quantized_model_init` | 等待 Megatron 激活的 Hook 管理 TE 缺失属性；仅将显式 DelayedScaling 委托 fp8_model_init，保留高精度初始化和嵌套上下文。其他启用的 recipe 明确拒绝，不覆盖原生属性。 |
 | `megatron.embeddings.fused-rope.apex` | `rope_utils:fused_apply_rotary_pos_emb` | Megatron 的融合 `sbhd` kernel 依赖 MUSA TE 树中并不存在的 `…attention.rope` 导入，导致 argparse 默认的 `apply_rope_fusion` 在第一步之前就被拒绝；改为绑定 apex 的等价 kernel |
 | `megatron.embeddings.fused-rope-thd.apex` | `rope_utils:fused_apply_rotary_pos_emb_thd` | 同一处缺失导入的 packed（`thd`）部分；使用 apex 的 padded 布局 kernel，`cp_size=1` |
 | `megatron.embeddings.rope-fusion.unfused-fallback` | `rope_utils:apply_rotary_pos_emb` | apex 没有 interleaved 和 context parallel 变体；仅把这类调用降级到上游的非融合分支（告警一次），而不是在训练中途报错 |
 | `megatron.legacy.fused-kernels.load.noop` | `legacy.fused_kernels:load` | 该 loader 探测 `nvcc`/定义扩展构建入口——没有 MUSA 构建路径 |
 | `megatron.training.set-jit-fusion-options.noop`（含 `initialize` 别名） | `set_jit_fusion_options` | 启动期 CUDA 预热/编译路径需先在 MUSA 上验证；验证前跳过 |
+| `megatron.dist-ckpt.musa-cpu-staging` | DCP filesystem 设备选择器（Megatron hook） | CUDA 兼容层下按实际 MUSA stream 选择设备，避免跳过 CPU staging；保留上游异步拷贝、同步和 checkpoint 分片 |
 | `megatron.dist-ckpt.no-fork-writer` | `FileSystemWriterAsync.write_preloaded_data_multiproc` | MUSA 初始化后 fork 的 bucket worker 在 `torch.save` 中段错误并卡死父进程；改为当前进程内顺序写同样的 bucket |
 | `megatron.training.overlap-flags.noop` | `training.arguments:validate_args` | 观测到的 TE fused-wgrad/DDP 组合会让 `param.grad` 为 None，破坏 Megatron overlap 反向 hook；DP-overlap 开关被强制关闭并告警 |
 | `megatron.training.profile.pytorch` | `training.arguments:validate_args` | 裸 `--profile` 会走 `cudaProfilerStart/Stop`/NVTX，MUSA 运行时不提供；改为自动启用 `--use-pytorch-profiler` |
@@ -208,8 +222,3 @@ MEGATRON_MUSA_RUN_INTEGRATION=1 MEGATRON_LM_PATH=/path/to/Megatron-LM \
 以下是已有文档记录的参考环境，不是完整测试矩阵。声明的上游范围（`>=0.14,<0.17`）只是版本守卫，不能证明所有版本、功能或框架均已通过。每次验证都应记录实际 revision、命令、通过/失败/跳过数量及未测路径。
 
 Python 3.10 · PyTorch 2.7.1a0（MUSA 版）· torch_musa 2.7.1 · torchada 0.1.86 · Megatron-LM `core_v0.16.1`（megatron-core 0.16.1）· MT-TransformerEngine 2.0.0 · apex（MT fork，融合 RoPE）· MTT S5000。
-
-## License
-
-`LICENSE` 文件沿用 Megatron-LM 的上游条款：主体为 NVIDIA 的 BSD 式许可，内嵌的
-Apache-2.0 文本仅适用于其中包含的第三方代码。本仓库继承该文件及其条款。

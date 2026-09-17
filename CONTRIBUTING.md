@@ -514,7 +514,3 @@ need link, command-syntax and source-consistency checks, not a training run.
 - [ ] Applicable acceptance commands, revisions, pass/fail/skip counts, fallback
       trade-offs and unresolved gaps are recorded; workflow changes also update
       both contributor guides and `AGENTS.md`.
-
-## License
-
-Licensed under the upstream Megatron-LM `LICENSE` (NVIDIA BSD-style main terms; Apache-2.0 for incorporated third-party code).

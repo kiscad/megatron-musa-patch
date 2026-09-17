@@ -454,7 +454,3 @@ MEGATRON_MUSA_PATCH=0 python train.py
 - [ ] 用户可见的行为、参数或开关有变化时，`README.md` 和 `README_zh.md` 都已更新。
 - [ ] 已记录适用的验收命令、revision、通过/失败/跳过数量、回退代价和未解决缺口；流程
       变化同步更新两份贡献指南和 `AGENTS.md`。
-
-## License
-
-遵循上游 Megatron-LM 的 `LICENSE`（主体为 NVIDIA BSD 式许可；包含的第三方代码适用 Apache-2.0）。

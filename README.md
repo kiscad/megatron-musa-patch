@@ -113,13 +113,27 @@ On a MUSA PyTorch build `torch.cuda` is a dead shell (no `_cuda_*` bindings) and
 | `megatron.fusions.persist-layer-norm.disable` | `fused_layer_norm:HAVE_PERSIST_LAYER_NORM` | the fallback never runs apex's persistent kernel |
 | `megatron.transformer-block.layer-norm.impl-local` | `transformer_block:LayerNormImpl` | TE's norm op aborted (`allocateSpace`) on the affected MUSA stack even for a `local` spec |
 | `megatron.te.layer-norm-linear.unfused` | `transformer_engine:TELayerNormColumnParallelLinear` | For LayerNorm only, PyTorch norm + TE Linear bypasses the fused norm `allocateSpace` failure in QKV/FC1 while retaining FP8 Linear and norm checkpoint names |
-| `megatron.core.utils.te-version-check.ignore` | `core.utils:is_te_min_version` | MUSA's Transformer Engine development tree does not follow NVIDIA TE release numbering; ignore upstream minimum-version thresholds while preserving importability checks |
-| `megatron.te.cpu-offload-context.signature-dispatch` | `transformer_engine:get_cpu_offload_context` | every `TransformerBlock` build calls TE's CPU-offload helper; the version policy above picks the six-argument (TE ≥ 2.5) call while the MUSA fork takes five, so the run died before the model existed; dispatch on the installed function's own signature |
+| `megatron.te.cpu-offload-context.signature-dispatch` | `transformer_engine:get_cpu_offload_context` | every `TransformerBlock` build calls TE's CPU-offload helper; when the fork's reported version disagrees with its real signature the six-argument (TE ≥ 2.5) call is picked while the fork takes five, so the run died before the model existed; dispatch on the installed function's own signature |
+| `megatron.fsdp.premul-sum.device-prescale` | `fsdp...param_and_grad_buffer:gradient_reduce_preprocessing` | torch_musa/MCCL has no PREMUL_SUM; the FSDP averaging branch prescales on device with `mul_` and reduces with SUM, other branches pass through |
+| `megatron.bridge-communicator.subgroups-backend` | `pipeline_parallel.bridge_communicator:dist` | `new_subgroups_by_enumeration` calls `new_group` inside c10d, bypassing torchada's nccl→mccl translation; a module-local proxy translates exactly the `nccl` request |
+| `megatron.hyper-comm-grid.subgroups-backend` | `hyper_comm_grid:dist` | same bypass as the bridge communicator; same proxy, `nccl` only |
+| `megatron.te.grouped-linear.mem-monitor-compat` | `musa_patch` import in `transformer_engine...grouped_linear.py` | MT-TE hard-depends on the legacy `musa_patch.mem_utils.MemMonitor`; a minimal shim with the `max_token_num` counter is owned (sys.modules entries, undoable) and never shadows an existing package |
+| `megatron.moe.topk.fp64-reference` | `transformer.moe.moe_utils:torch` | MuDNN TopK rejects float64; moe_utils's torch global becomes a forwarding proxy adapting only FP64 topk via same-precision CPU indices + device gather |
+| `megatron.moe.permutation.unfused-musa` | `transformer.moe.moe_utils:permute` | TE's moe_permute kernel aborts for FP32/FP64; demote exactly that combination to upstream's `fused=False` reference |
+| `megatron.moe.unpermutation.unfused-musa` | `transformer.moe.moe_utils:unpermute` | paired demotion so both ends share one index format (declared via requires) |
+| `megatron.moe.grouped-gemm.torch-ops` | `transformer.moe.grouped_gemm_util:ops` | the fanshiqing grouped_gemm has no MUSA build; reference `ops.gmm` from per-expert `torch.matmul` (trans_b, empty-expert gradients), declined when the vendor package exists |
+| `megatron.moe.grouped-gemm.available-flag` | `grouped_gemm_util:grouped_gemm_is_available` | report truthfully once the fallback is installed (requires torch-ops) |
+| `megatron.moe.grouped-gemm.assert-noop` | `grouped_gemm_util:assert_grouped_gemm_is_available` | GroupedMLP's construction assert now consults the patched availability flag |
+| `megatron.softmax.kernel-availability.musa` | `fused_softmax:FusedScaleMaskSoftmax.is_kernel_available` | the probe imports `scaled_masked_softmax_cuda` and dies with ModuleNotFoundError; return False when the extension is absent so the torch fallback runs |
+| `megatron.te.norm.unfused-musa` | `transformer_engine:TENorm` | TE's standalone LayerNorm/RMSNorm aborts in MUSA `allocateSpace`; subclass the TE modules and replace only forward (functional norm, params cast to input dtype), keeping isinstance/sharding contracts |
+| `megatron.te.attention.capability-dispatch` | `transformer_engine:TEDotProductAttention.forward` | Capability dispatch that implements no attention math: flash-capable inputs (FP16/BF16, head_dim 64–192, no dropout) run the native MT-TE flash path; everything else eligible runs TE's own UnfusedDotProductAttention backend; padded THD is sliced into per-sequence vendor calls because native THD drops `cu_seqlens` and yields NaN. CP>1/FP8 DPA/special softmax/windows/max-logit remain upstream. |
+| `megatron.te.quantized-model-init.delayed-compat` | `transformer_engine.pytorch.quantized_model_init` | Megatron-triggered, ownership-tracked TE alias delegates only explicit DelayedScaling to native fp8_model_init; preserves high-precision initialization and nested contexts. Other enabled recipes are rejected; native attributes are never overwritten. |
 | `megatron.embeddings.fused-rope.apex` | `rope_utils:fused_apply_rotary_pos_emb` | Megatron gated its fused `sbhd` kernel on a TE import (`…attention.rope`) the MUSA TE tree does not have, so `apply_rope_fusion` — argparse's default — was rejected before the first step; bind apex's equivalent kernel |
 | `megatron.embeddings.fused-rope-thd.apex` | `rope_utils:fused_apply_rotary_pos_emb_thd` | the packed (`thd`) half of the same missing import; apex's padded-layout kernel, `cp_size=1` |
 | `megatron.embeddings.rope-fusion.unfused-fallback` | `rope_utils:apply_rotary_pos_emb` | apex has no interleaved and no context-parallel variant; demote exactly those calls to upstream's unfused branch (warned once) rather than aborting mid-step |
 | `megatron.legacy.fused-kernels.load.noop` | `legacy.fused_kernels:load` | the loader probes `nvcc`/defines an extension builder — no MUSA build route |
 | `megatron.training.set-jit-fusion-options.noop` (+ `initialize` alias) | `set_jit_fusion_options` | startup CUDA warm-up/compile path needs validation on MUSA; skipped until proven |
+| `megatron.dist-ckpt.musa-cpu-staging` | DCP filesystem device selector (Megatron hook) | use the actual MUSA stream device under CUDA API emulation so CPU staging is not skipped; preserve upstream asynchronous copies, synchronization and checkpoint sharding |
 | `megatron.dist-ckpt.no-fork-writer` | `FileSystemWriterAsync.write_preloaded_data_multiproc` | forked bucket workers segfaulted in `torch.save` after MUSA init and hung the parent; write the same buckets sequentially in-process |
 | `megatron.training.overlap-flags.noop` | `training.arguments:validate_args` | the observed TE fused-wgrad/DDP integration left `param.grad` None, breaking Megatron's overlap backward hook; DP-overlap flags are forced off with a warning |
 | `megatron.training.profile.pytorch` | `training.arguments:validate_args` | bare `--profile` enters `cudaProfilerStart/Stop`/NVTX, which the MUSA runtime does not provide; `--use-pytorch-profiler` is enabled instead |
@@ -215,10 +229,3 @@ The package version tracks the Megatron-LM release it patches: `0.16.1.dev0` on 
 The recorded reference environment below is not an exhaustive test matrix. The declared upstream range (`>=0.14,<0.17`) is a version guard, not evidence that every version, feature or framework has passed. Report actual revisions, commands, pass/fail/skip counts and untested paths for each validation run.
 
 Python 3.10 · PyTorch 2.7.1a0 (MUSA build) · torch_musa 2.7.1 · torchada 0.1.86 · Megatron-LM `core_v0.16.1` (`megatron-core` 0.16.1) · MT-TransformerEngine 2.0.0 · apex (MT fork, fused RoPE) · MTT S5000.
-
-## License
-
-The `LICENSE` file carries Megatron-LM's upstream terms: NVIDIA's BSD-style
-license as the main terms, with embedded Apache-2.0 text applying to the
-third-party code it incorporates. This repository inherits that file and its
-terms.
