@@ -652,3 +652,40 @@ def test_tensor_musa_subclass_accepts_cuda_spelling(torch):
     moved = tensor.musa("cuda:0")
     assert moved.device == torch.device("musa", 0)
     assert isinstance(moved, Subclass)
+
+
+def test_transformers_device_cache_refresh_on_unapply(fake_backend, monkeypatch):
+    from functools import lru_cache
+
+    module = types.ModuleType('transformers.utils.import_utils')
+
+    @lru_cache(None)
+    def is_torch_cuda_available():
+        return fake_backend.torch.cuda.is_available()
+
+    module.is_torch_cuda_available = is_torch_cuda_available
+    monkeypatch.setitem(sys.modules, module.__name__, module)
+    assert not is_torch_cuda_available()
+    torch_cuda.apply()
+    assert is_torch_cuda_available()
+    torch_cuda.unapply()
+    assert not is_torch_cuda_available()
+
+
+def test_device_refresh_preserves_unrelated_transformers_cache(fake_backend, monkeypatch):
+    from functools import lru_cache
+
+    module = types.ModuleType('transformers.utils.import_utils')
+    calls = []
+
+    @lru_cache(None)
+    def is_unrelated_available():
+        calls.append(True)
+        return True
+
+    module.is_unrelated_available = is_unrelated_available
+    monkeypatch.setitem(sys.modules, module.__name__, module)
+    is_unrelated_available()
+    torch_cuda.apply()
+    is_unrelated_available()
+    assert calls == [True]

@@ -25,7 +25,10 @@ import functools
 import logging
 import sys
 from threading import RLock
+
 from typing import Any
+
+from .. import _compat
 
 __all__ = ["apply", "unapply", "is_applied", "torchada_version"]
 
@@ -73,6 +76,44 @@ def _restore_overrides() -> None:
             setattr(owner, name, previous)
         # Keep a failing restoration in the journal so unapply can be retried.
         _OVERRIDES.pop()
+
+
+def _refresh_transformers_device_constants() -> None:
+    """Invalidate only cached probes affected by the CUDA/MUSA aliases.
+
+    Do not import transformers or clear unrelated package-availability caches.
+    Refresh both after activation and after rollback/unapply, so the cached
+    result always reflects the currently owned availability binding.
+    """
+    module = sys.modules.get("transformers.utils.import_utils")
+    if module is None:
+        return
+    blocked, detail = _compat.check_version_gate("transformers >=5")
+    if blocked:
+        # The frozen-constant mechanism this refresh targets appeared in
+        # transformers 5.x; older versions re-evaluate on every call.
+        logger.debug("transformers device-constant refresh skipped (%s)", detail)
+        return
+    refreshed = False
+    names = (
+        "is_torch_cuda_available", "is_torch_bf16_gpu_available",
+        "is_torch_fp16_available_on_device", "is_torch_bf16_available_on_device",
+        "is_torch_tf32_available", "is_flash_attn_2_available", "is_flash_attn_3_available",
+    )
+    for name in names:
+        fn = vars(module).get(name)
+        clear = getattr(fn, "cache_clear", None)
+        if not callable(clear):
+            continue
+        clear()
+        refreshed = True
+    if refreshed:
+        # The curated list above is bound to the transformers freeze
+        # mechanism (lru_cache + compile constants, transformers 5.x);
+        # re-check it when transformers changes how it freezes probes.
+        logger.debug(
+            "transformers device-availability caches refreshed (transformers %s)",
+            _compat.transformers_version())
 
 
 def _alias_availability(torch: Any, musa: Any) -> None:
@@ -220,8 +261,10 @@ def apply() -> None:
             _alias_tensor_type_names(torch)
             _alias_graph_class(torch, musa)
             _fix_tensor_musa_for_subclasses(torch)
+            _refresh_transformers_device_constants()
         except BaseException:
             _restore_overrides()
+            _refresh_transformers_device_constants()
             raise
 
         _APPLIED = True
@@ -240,4 +283,5 @@ def unapply() -> None:
     global _APPLIED
     with _LOCK:
         _restore_overrides()
+        _refresh_transformers_device_constants()
         _APPLIED = False
