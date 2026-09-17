@@ -126,8 +126,10 @@ On a MUSA PyTorch build `torch.cuda` is a dead shell (no `_cuda_*` bindings) and
 | `megatron.moe.grouped-gemm.assert-noop` | `grouped_gemm_util:assert_grouped_gemm_is_available` | GroupedMLP's construction assert now consults the patched availability flag |
 | `megatron.softmax.kernel-availability.musa` | `fused_softmax:FusedScaleMaskSoftmax.is_kernel_available` | the probe imports `scaled_masked_softmax_cuda` and dies with ModuleNotFoundError; return False when the extension is absent so the torch fallback runs |
 | `megatron.te.norm.unfused-musa` | `transformer_engine:TENorm` | TE's standalone LayerNorm/RMSNorm aborts in MUSA `allocateSpace`; subclass the TE modules and replace only forward (functional norm, params cast to input dtype), keeping isinstance/sharding contracts |
-| `megatron.te.attention.capability-dispatch` | `transformer_engine:TEDotProductAttention.forward` | Capability dispatch that implements no attention math: flash-capable inputs (FP16/BF16, head_dim 64–192, no dropout) run the native MT-TE flash path; everything else eligible runs TE's own UnfusedDotProductAttention backend; padded THD is sliced into per-sequence vendor calls because native THD drops `cu_seqlens` and yields NaN. CP>1/FP8 DPA/special softmax/windows/max-logit remain upstream. |
+| `megatron.te.attention.capability-dispatch` | `transformer_engine:TEDotProductAttention.forward` | Capability dispatch that implements no attention math: flash-capable inputs (FP16/BF16, head_dim 64–192, no dropout) run the native MT-TE flash path; everything else eligible runs TE's own UnfusedDotProductAttention backend; padded THD is sliced into per-sequence vendor calls because native THD drops `cu_seqlens` and yields NaN. Declines entirely when the TE hard-coded-flash marker is gone (source probe). CP>1/FP8 DPA/special softmax/windows/max-logit remain upstream. |
 | `megatron.te.quantized-model-init.delayed-compat` | `transformer_engine.pytorch.quantized_model_init` | Megatron-triggered, ownership-tracked TE alias delegates only explicit DelayedScaling to native fp8_model_init; preserves high-precision initialization and nested contexts. Other enabled recipes are rejected; native attributes are never overwritten. |
+| `megatron.te.factory-shim.torchscript-compat` | `transformer_engine:musa/patch_after_import_torch` | MT-TE rebinds torch factory functions (tensor/zeros/ones/empty/rand/arange/empty_like) to untyped device-translation wrappers, so any eager `torch.jit.script` over a factory call fails; each scripting call temporarily registers the seven known vendor wrappers in TorchScript’s ATen builtin table, leaving eager factory bindings unchanged during compilation and preserving `device='cuda'` translation intact. MUSA-fork-only; needed before Megatron import. Compiled graphs retain ATen device semantics; CUDA string literals are not translated inside them. Skips when the installed TE has no factory wrappers (source probe). Undo preserves subsequent third-party replacements. |
+| `megatron.te.utils-module.safe-seed` | `transformer_engine:musa/pytorch/utils` | The vendor module iterates sys.modules with lazy-module getattrs at import time, which crashes the whole TE import with transformers 5.x ('dictionary changed size during iteration'); a replica without the fragile loop is seeded before the vendor body runs (same pattern as the musa_patch.mem_utils shim). Skips when the vendor loop is gone (source probe). |
 | `megatron.embeddings.fused-rope.apex` | `rope_utils:fused_apply_rotary_pos_emb` | Megatron gated its fused `sbhd` kernel on a TE import (`…attention.rope`) the MUSA TE tree does not have, so `apply_rope_fusion` — argparse's default — was rejected before the first step; bind apex's equivalent kernel |
 | `megatron.embeddings.fused-rope-thd.apex` | `rope_utils:fused_apply_rotary_pos_emb_thd` | the packed (`thd`) half of the same missing import; apex's padded-layout kernel, `cp_size=1` |
 | `megatron.embeddings.rope-fusion.unfused-fallback` | `rope_utils:apply_rotary_pos_emb` | apex has no interleaved and no context-parallel variant; demote exactly those calls to upstream's unfused branch (warned once) rather than aborting mid-step |
@@ -186,6 +188,7 @@ All three channels are idempotent. Automatic activation and explicit import regi
 | `MEGATRON_MUSA_PATCH_ARCH` | `8.3` | Synthetic NVIDIA capability, e.g. `9.0`. |
 | `MEGATRON_MUSA_PATCH_BLOCK_LAYERNORM` | `local` | `upstream` keeps `LayerNormImpl = TENorm`. |
 | `MEGATRON_MUSA_PATCH_TE_FUSED_LAYERNORM` | `0` | `1` restores upstream TE fused norm-linear for upgrade testing. |
+| `MEGATRON_MUSA_PATCH_IGNORE_VERSION_GATES` | *(empty)* | `1`/`true`/`*` bypasses all version gates; a comma-separated distribution list bypasses only those gates. Capability probes and patch selection still apply. |
 | `MEGATRON_MUSA_PATCH_ROPE_FUSION` | `1` | `0` declines the apex fused-RoPE fallback, so upstream keeps reporting `apply_rope_fusion` as unavailable. |
 | `MEGATRON_MUSA_PATCH_JIT_WARMUP` | `0` | `1` keeps upstream's JIT warm-up. |
 | `MEGATRON_MUSA_PATCH_CKPT_FORK` | `0` | `1` keeps upstream's forked checkpoint writer. |
@@ -229,3 +232,42 @@ The package version tracks the Megatron-LM release it patches: `0.16.1.dev0` on 
 The recorded reference environment below is not an exhaustive test matrix. The declared upstream range (`>=0.14,<0.17`) is a version guard, not evidence that every version, feature or framework has passed. Report actual revisions, commands, pass/fail/skip counts and untested paths for each validation run.
 
 Python 3.10 · PyTorch 2.7.1a0 (MUSA build) · torch_musa 2.7.1 · torchada 0.1.86 · Megatron-LM `core_v0.16.1` (`megatron-core` 0.16.1) · MT-TransformerEngine 2.0.0 · apex (MT fork, fused RoPE) · MTT S5000.
+
+The two early TE hooks are the only exceptions to Megatron-triggered activation;
+registration remains free of accelerator imports. The device layer clears only
+Transformers CUDA/BF16/FP16/TF32 and FlashAttention probe caches after activation,
+rollback and unapply. Unrelated package caches are preserved. The safe-utils
+bridge covers ordinary imports; live reload of vendor TE modules is unsupported.
+Start a fresh process after changing TE or patches. The RoPE dispatcher also
+selects Megatron's unfused branch for interleaved calls through native Core TE
+wrappers when their TE < 2.3 version guard would reject the call.
+
+### Declarative version gates
+
+Both `AttrPatch` and `HookPatch` accept `version_gates=("transformer_engine >=2.0,<2.1",)`.
+Comparisons within a string and gates within the tuple are AND-ed; an empty tuple imposes no restriction.
+The three TE norm patches currently declare this range. A range describes patch applicability,
+**not evidence that the vendor implementation outside the range is fixed**.
+
+- Gates read distribution metadata without importing packages. Names are case-insensitive;
+  hyphens, underscores and dots are equivalent.
+- Supported operators: `>=`, `>`, `<=`, `<`, `==`, `!=`. Bounds must be dotted integers.
+  Numeric release tuples are zero-padded, so `2.0 == 2.0.0`. Installed rc/dev/post/local
+  suffixes do not affect ordering: `2.0rc1` and `2.0+vendor` count as `2.0`.
+  This is not full PEP 440; epochs, wildcards and `~=` are unsupported.
+- Missing metadata leaves target resolution/capability checks in charge; it is not a verified match.
+  Unrecognized installed versions block. Reports retain the declaration in `version_gates` and
+  explain blocked gates in the skipped record's `detail`. On first application, if every patch
+  on a target is excluded, the engine does not resolve a potentially removed upstream symbol.
+- `MEGATRON_MUSA_PATCH_IGNORE_VERSION_GATES=1` (also `true` or `*`) bypasses all version gates;
+  `=transformer_engine,transformers` bypasses only those packages; `0/false/off` bypasses none.
+  ONLY/DISABLE, companion requirements and source/capability probes still apply.
+  Set switches before activation. Changing them does not undo existing wrappers or rerun hooks;
+  use a fresh process, or unapply/install for this package's reversible changes.
+
+Source markers are build fingerprints, not correctness proofs. Probing does not execute modules:
+missing packages/files return False, unsupported layouts return None. Current callers keep their
+workarounds on None and decline on False; even a formatting change may remove a marker, so upgrades
+still require original import and numerical regression tests. The MoE topk probe uses deterministic
+input and checks the result without consuming training RNG. To verify an upstream fix, disable the
+patch and rerun its original regression; IGNORE_VERSION_GATES instead trials an out-of-range patch.

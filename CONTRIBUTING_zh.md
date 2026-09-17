@@ -22,7 +22,10 @@ Megatron-LM `core_v0.16.1`。
    两份拷贝就开始分叉。
 2. **不要求调用方安排 patch import 顺序。** 默认自动通道必须在 Megatron 使用 CUDA API
    之前激活。诊断时支持在引擎能力范围内的早/晚显式激活：已经创建的实例、闭包和类基类
-   无法事后修复。始终不导入 Megatron 的进程，其补丁应保持 pending、不生效。
+   无法事后修复。始终不导入 Megatron 的进程，其补丁应保持 pending、不生效；仅
+   `megatron.te.factory-shim.torchscript-compat` 与 `megatron.te.utils-module.safe-seed`
+   可在 MUSA TE 导入边界先行生效，以支持 ms-swift 早于 Core 的脚本化导入。
+   此例外不扩展到设备适配或其他 Hook。
 3. **激活保持惰性和明确作用域。** 尚未导入 Megatron 时，import 本包只注册补丁和 watcher，
    不得导入 torch/Megatron 或激活设备 shim。已经加载的目标可以立即应用补丁；显式
    `apply()` 则有意主动导入目标。
@@ -454,3 +457,31 @@ MEGATRON_MUSA_PATCH=0 python train.py
 - [ ] 用户可见的行为、参数或开关有变化时，`README.md` 和 `README_zh.md` 都已更新。
 - [ ] 已记录适用的验收命令、revision、通过/失败/跳过数量、回退代价和未解决缺口；流程
       变化同步更新两份贡献指南和 `AGENTS.md`。
+
+### 版本门控的开发约定
+
+`AttrPatch` 和 `HookPatch` 都支持 `version_gates=("transformer_engine >=2.0,<2.1",)`。
+同一字符串内的比较以及 tuple 中的多个 gate 均为 AND；空 tuple 不限制版本。
+当前三个 TE norm 补丁声明了这个范围。这只表示补丁的适用范围，**不证明范围外的厂商实现已修复**。
+
+- 使用安装发行包元数据，不导入目标包；发行包名忽略大小写，`-`、`_`、`.` 等价。
+- 支持 `>=`、`>`、`<=`、`<`、`==`、`!=`；声明边界只接受点分数字。
+  按数字 release 比较并补零，`2.0 == 2.0.0`。安装版本的 `rc/dev/post/local` 后缀不参与排序，
+  例如 `2.0rc1` 和 `2.0+vendor` 均按 `2.0` 判断；这不是完整 PEP 440，epoch、通配符、`~=` 不支持。
+- 元数据缺失时保持原有目标解析/能力探测流程，不能据此认定版本匹配；已安装版本格式无法识别则跳过。
+  被 gate 排除的补丁在 `report()` 中为 `skipped`，`detail` 说明原因，`version_gates` 保留声明。
+  首次应用时同目标所有补丁均被排除，则不解析可能已被上游删除的符号。
+- `MEGATRON_MUSA_PATCH_IGNORE_VERSION_GATES=1`（也接受 `true` 或 `*`）放行全部版本门控；
+  `=transformer_engine,transformers` 只放行指定包；`0/false/off` 不放行。
+  这不会绕过 ONLY/DISABLE、依赖要求或源码/能力探针，也不会强制被工厂拒绝的补丁生效。
+  开关应在激活前设置；进程中修改开关不会撤销已安装包装或重新运行完成的 Hook。
+  改动后使用新进程，或对本包可逆部分执行 unapply/install。
+
+源码探针仅匹配当前厂商代码指纹，不执行模块；缺包或缺文件为 False，不可判定的布局为 None。
+目前调用方在 None 时保留兼容补丁，在 False 时退出；marker 因格式变化消失也可能触发退出，
+因此升级后仍要跑原始导入和数值回归。MoE topk 探针使用确定性输入并核对结果，不消耗训练 RNG。
+验证“上游已修复”应**禁用对应 patch** 后复跑原始用例；IGNORE_VERSION_GATES 是试用越界补丁的诊断开关。
+
+声明由共享校验器在构造时验证，只缓存解析结果，不缓存环境和安装元数据。
+测试使用可控元数据，不依赖系统恰好装了哪个 Transformers 版本，且通过 engine fixture 清理 watcher。
+引擎变更至少运行 `tests/test_version_gates.py`、engine 生命周期/依赖测试及完整回归。

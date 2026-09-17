@@ -27,7 +27,11 @@ them will be rejected even if it "works":
    activate before Megatron uses CUDA APIs. Support early and late explicit
    activation for diagnostics within the engine's limits: existing instances,
    closures and class bases cannot be repaired after the fact. A process that
-   never imports Megatron should retain pending, inactive patches.
+   never imports Megatron should retain pending, inactive patches, except for
+   the MUSA-fork-only `megatron.te.factory-shim.torchscript-compat` and
+   `megatron.te.utils-module.safe-seed` hooks at the TE import boundary.
+   These support ms-swift scripting before Core import; do not extend this
+   exception to device adaptation or other hooks.
 3. **Keep activation lazy and scoped.** In a process that has not imported
    Megatron, importing this package only registers patches and a watcher; it
    must not import torch/Megatron or activate the device shim. Already-loaded
@@ -514,3 +518,38 @@ need link, command-syntax and source-consistency checks, not a training run.
 - [ ] Applicable acceptance commands, revisions, pass/fail/skip counts, fallback
       trade-offs and unresolved gaps are recorded; workflow changes also update
       both contributor guides and `AGENTS.md`.
+
+### Version-gate maintenance contract
+
+Both `AttrPatch` and `HookPatch` accept `version_gates=("transformer_engine >=2.0,<2.1",)`.
+Comparisons within a string and gates within the tuple are AND-ed; an empty tuple imposes no restriction.
+The three TE norm patches currently declare this range. A range describes patch applicability,
+**not evidence that the vendor implementation outside the range is fixed**.
+
+- Gates read distribution metadata without importing packages. Names are case-insensitive;
+  hyphens, underscores and dots are equivalent.
+- Supported operators: `>=`, `>`, `<=`, `<`, `==`, `!=`. Bounds must be dotted integers.
+  Numeric release tuples are zero-padded, so `2.0 == 2.0.0`. Installed rc/dev/post/local
+  suffixes do not affect ordering: `2.0rc1` and `2.0+vendor` count as `2.0`.
+  This is not full PEP 440; epochs, wildcards and `~=` are unsupported.
+- Missing metadata leaves target resolution/capability checks in charge; it is not a verified match.
+  Unrecognized installed versions block. Reports retain the declaration in `version_gates` and
+  explain blocked gates in the skipped record's `detail`. On first application, if every patch
+  on a target is excluded, the engine does not resolve a potentially removed upstream symbol.
+- `MEGATRON_MUSA_PATCH_IGNORE_VERSION_GATES=1` (also `true` or `*`) bypasses all version gates;
+  `=transformer_engine,transformers` bypasses only those packages; `0/false/off` bypasses none.
+  ONLY/DISABLE, companion requirements and source/capability probes still apply.
+  Set switches before activation. Changing them does not undo existing wrappers or rerun hooks;
+  use a fresh process, or unapply/install for this package's reversible changes.
+
+Source markers are build fingerprints, not correctness proofs. Probing does not execute modules:
+missing packages/files return False, unsupported layouts return None. Current callers keep their
+workarounds on None and decline on False; even a formatting change may remove a marker, so upgrades
+still require original import and numerical regression tests. The MoE topk probe uses deterministic
+input and checks the result without consuming training RNG. To verify an upstream fix, disable the
+patch and rerun its original regression; IGNORE_VERSION_GATES instead trials an out-of-range patch.
+
+Declarations share constructor validation. Only parsing is cached, never environment or metadata.
+Tests must control metadata instead of depending on the installed Transformers version, and use
+the engine fixture to clean up watchers. Run test_version_gates.py, engine lifecycle/dependency
+tests and the full regression suite for engine changes.

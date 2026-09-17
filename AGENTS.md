@@ -34,7 +34,10 @@ smoke 成功，均不能单独证明上述三类验收完成。不要把未测�
    原始位置、必要差异和升级检查点；不要建设与上游平行维护的模型实现。
 4. **保持惰性激活。** 注册路径保持标准库可用；`patches/` 顶层不导入 torch、Megatron、
    TE 或 torchada。torchada import 有全局副作用，不用它探测是否安装。真实设备适配等待
-   Megatron；显式 `apply()` 是诊断入口。自动 entry point 的异常边界不能破坏 `import torch`。
+   Megatron；仅 `megatron.te.factory-shim.torchscript-compat` 与
+   `megatron.te.utils-module.safe-seed` 可在 MUSA TE 导入边界先行生效，
+   以支持 ms-swift 早于 Core 的脚本化导入；不得据此放开其他早期 Hook。
+   显式 `apply()` 是诊断入口。自动 entry point 的异常边界不能破坏 `import torch`。
 5. **使用现有引擎和 ledger。** 不另建 `.pth`、`sitecustomize`、源码重写或遍历全部模块的
    patch 系统。不要直接把 `sys.modules["torch.cuda"]` 指向 `torch.musa`。通用翻译交给
    torchada；本包增加有根因和测试支撑的 Megatron 契约补偿。
@@ -56,7 +59,7 @@ smoke 成功，均不能单独证明上述三类验收完成。不要把未测�
 | `pyproject.toml` | 依赖、唯一包版本来源、`torch.backends` entry point、pytest 配置。 |
 | `src/megatron_musa_patch/activation.py`、`__init__.py` | 自动/显式/立即激活及公开 API；导入时序问题先看这里。 |
 | `_engine.py` | import watcher、属性链、别名、所有权、回滚、report；仅修改通用机制。 |
-| `_compat.py`、`_errors.py` | 版本与目标解析、异常上下文；版本范围同时检查声明和判断函数。 |
+| `_compat.py`、`_errors.py` | 版本与目标解析、异常上下文；版本范围同时检查声明和判断函数，version_gates 只比较数字 release。 |
 | `_env.py` | 环境开关集中说明与惰性读取；不要把环境变量值缓存到模块常量。 |
 | `backends/torch_cuda.py` | torchada 之上的设备契约补偿，不实现第二套通用适配层。 |
 | `patches/_*.py`、`patches/__init__.py` | 具体补丁与 `MODULES` 注册；同目标的先后顺序有意义。 |
@@ -312,3 +315,13 @@ torchada 等依赖已经产生的全局副作用。
 
 单次任务完成应指该任务范围内的修复和适用验证完成；项目整体无缝兼容的目标必须持续以
 上述三类原始调用方的实际运行结果衡量。
+
+## 9. version_gates 维护补充
+
+AttrPatch/HookPatch 的声明通过共享校验器检查，运行时只读发行包元数据；注册仍限标准库。
+多个 gate 为 AND；未知元数据不限制但不代表已验证，异常版本字符串跳过。数字 release 补零比较，
+安装版本后缀不参与排序，不宣称完整 PEP 440 支持。IGNORE_VERSION_GATES 只放行版本门控，
+不能绕过 ONLY/DISABLE、requires 或源码/能力探针；先设置开关再激活。
+范围外或 marker 缺失不等于已修复；禁用补丁后复跑原始失败用例才能满足 remove_when。
+测试必须控制元数据、清理 watcher，覆盖 gate 排除后的缺失符号、链/依赖、卸载重装和失败报告。
+能力探针不能消耗训练 RNG；设备操作的结果检查同时负责暴露异步失败。

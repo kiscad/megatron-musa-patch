@@ -120,8 +120,10 @@ MUSA 版 PyTorch 完全没有 `_cuda_*` 绑定，`torch.cuda` 是空壳，而 Me
 | `megatron.moe.grouped-gemm.assert-noop` | `grouped_gemm_util:assert_grouped_gemm_is_available` | GroupedMLP 构造断言改为查询被修补的可用性标志 |
 | `megatron.softmax.kernel-availability.musa` | `fused_softmax:FusedScaleMaskSoftmax.is_kernel_available` | 探测内部 import `scaled_masked_softmax_cuda` 会直接 ModuleNotFoundError；扩展缺失时返回 False 走 torch 回退 |
 | `megatron.te.norm.unfused-musa` | `transformer_engine:TENorm` | TE 独立 LayerNorm/RMSNorm 在 MUSA `allocateSpace` 中止；子类化 TE 模块仅替换 forward（functional norm，参数 cast 到输入 dtype），isinstance/分片契约保留 |
-| `megatron.te.attention.capability-dispatch` | `transformer_engine:TEDotProductAttention.forward` | 按内核能力分发、不实现 attention 数学：满足 flash 条件（FP16/BF16、head_dim 64–192、无 dropout）的输入走原生 MT-TE flash；其余符合条件的输入走 TE 自带的 UnfusedDotProductAttention 后端；padding THD 切成逐序列厂商调用（原生 THD 丢弃 `cu_seqlens` 会得到 NaN）。CP>1/FP8 DPA/特殊 softmax/window/max-logit 仍交上游。 |
+| `megatron.te.attention.capability-dispatch` | `transformer_engine:TEDotProductAttention.forward` | 按内核能力分发、不实现 attention 数学：满足 flash 条件（FP16/BF16、head_dim 64–192、无 dropout）的输入走原生 MT-TE flash；其余符合条件的输入走 TE 自带的 UnfusedDotProductAttention 后端；padding THD 切成逐序列厂商调用（原生 THD 丢弃 `cu_seqlens` 会得到 NaN）。TE 硬编码 flash 标记消失时整体放弃（源码探针）。CP>1/FP8 DPA/特殊 softmax/window/max-logit 仍交上游。 |
 | `megatron.te.quantized-model-init.delayed-compat` | `transformer_engine.pytorch.quantized_model_init` | 等待 Megatron 激活的 Hook 管理 TE 缺失属性；仅将显式 DelayedScaling 委托 fp8_model_init，保留高精度初始化和嵌套上下文。其他启用的 recipe 明确拒绝，不覆盖原生属性。 |
+| `megatron.te.factory-shim.torchscript-compat` | `transformer_engine:musa/patch_after_import_torch` | MT-TE 将 torch 工厂函数（tensor/zeros/ones/empty/rand/arange/empty_like）重绑为无类型设备翻译包装，任何覆盖工厂调用的 eager `torch.jit.script` 都会编译失败；现在每次脚本化编译时向 TorchScript 的 ATen builtin 表临时登记七个已知厂商包装，编译期间也不重绑 eager 工厂， `device='cuda'` 翻译保持不变。仅对 MUSA TE fork 启用，需在 Megatron 导入前生效。编译图保持 ATen 设备语义，不翻译图内 CUDA 字符串；TE 无工厂包装时自动跳过（源码探针）。撤销保留第三方后续替换。 |
+| `megatron.te.utils-module.safe-seed` | `transformer_engine:musa/pytorch/utils` | 厂商模块在导入期裸迭代 sys.modules 并对 lazy 模块做 getattr，transformers 5.x 下会令整个 TE 导入链崩溃（'dictionary changed size during iteration'）；在其执行前种入去掉该危险循环的等价模块（与 musa_patch.mem_utils shim 同一模式）。厂商修复该循环后自动跳过（源码探针）。 |
 | `megatron.embeddings.fused-rope.apex` | `rope_utils:fused_apply_rotary_pos_emb` | Megatron 的融合 `sbhd` kernel 依赖 MUSA TE 树中并不存在的 `…attention.rope` 导入，导致 argparse 默认的 `apply_rope_fusion` 在第一步之前就被拒绝；改为绑定 apex 的等价 kernel |
 | `megatron.embeddings.fused-rope-thd.apex` | `rope_utils:fused_apply_rotary_pos_emb_thd` | 同一处缺失导入的 packed（`thd`）部分；使用 apex 的 padded 布局 kernel，`cp_size=1` |
 | `megatron.embeddings.rope-fusion.unfused-fallback` | `rope_utils:apply_rotary_pos_emb` | apex 没有 interleaved 和 context parallel 变体；仅把这类调用降级到上游的非融合分支（告警一次），而不是在训练中途报错 |
@@ -192,6 +194,7 @@ MEGATRON_LM_PATH=/path/to/Megatron-LM PYTHON=/path/to/venv/bin/python \
 | `MEGATRON_MUSA_PATCH_ARCH` | `8.3` | 合成的 NVIDIA 架构号，例如 `9.0`。 |
 | `MEGATRON_MUSA_PATCH_BLOCK_LAYERNORM` | `local` | 设为 `upstream` 则保留 `LayerNormImpl = TENorm`。 |
 | `MEGATRON_MUSA_PATCH_TE_FUSED_LAYERNORM` | `0` | 设为 `1` 恢复上游 TE 融合 norm-linear，供升级验证。 |
+| `MEGATRON_MUSA_PATCH_IGNORE_VERSION_GATES` | 空 | `1`/`true`/`*` 放行所有版本门控；包名列表只放行指定包。不会绕过能力探针和补丁选择。 |
 | `MEGATRON_MUSA_PATCH_ROPE_FUSION` | `1` | 设为 `0` 拒绝 apex 融合 RoPE 回退，上游会继续报告 `apply_rope_fusion` 不可用。 |
 | `MEGATRON_MUSA_PATCH_JIT_WARMUP` | `0` | 设为 `1` 保留上游的 JIT 预热。 |
 | `MEGATRON_MUSA_PATCH_CKPT_FORK` | `0` | 设为 `1` 保留上游的 fork 式 checkpoint writer。 |
@@ -222,3 +225,34 @@ MEGATRON_MUSA_RUN_INTEGRATION=1 MEGATRON_LM_PATH=/path/to/Megatron-LM \
 以下是已有文档记录的参考环境，不是完整测试矩阵。声明的上游范围（`>=0.14,<0.17`）只是版本守卫，不能证明所有版本、功能或框架均已通过。每次验证都应记录实际 revision、命令、通过/失败/跳过数量及未测路径。
 
 Python 3.10 · PyTorch 2.7.1a0（MUSA 版）· torch_musa 2.7.1 · torchada 0.1.86 · Megatron-LM `core_v0.16.1`（megatron-core 0.16.1）· MT-TransformerEngine 2.0.0 · apex（MT fork，融合 RoPE）· MTT S5000。
+
+上述两个早期 TE Hook 是等待 Megatron 激活规则的限定例外；注册路径仍不导入加速器依赖。
+设备层仅清理 Transformers 的 CUDA/BF16/FP16/TF32 与 FlashAttention 探测缓存，
+并在 apply、失败回滚和 unapply 后执行，不清理其他包可用性缓存。
+safe-utils 桥接覆盖普通导入；不支持在运行中 reload 厂商 TE 模块，
+更换 TE 或补丁后应启动新进程。RoPE 分发还会识别 Core 原生 TE 包装的
+TE < 2.3 interleaved 限制，告警后走 Megatron 的非融合实现。
+
+### 声明式版本门控
+
+`AttrPatch` 和 `HookPatch` 都支持 `version_gates=("transformer_engine >=2.0,<2.1",)`。
+同一字符串内的比较以及 tuple 中的多个 gate 均为 AND；空 tuple 不限制版本。
+当前三个 TE norm 补丁声明了这个范围。这只表示补丁的适用范围，**不证明范围外的厂商实现已修复**。
+
+- 使用安装发行包元数据，不导入目标包；发行包名忽略大小写，`-`、`_`、`.` 等价。
+- 支持 `>=`、`>`、`<=`、`<`、`==`、`!=`；声明边界只接受点分数字。
+  按数字 release 比较并补零，`2.0 == 2.0.0`。安装版本的 `rc/dev/post/local` 后缀不参与排序，
+  例如 `2.0rc1` 和 `2.0+vendor` 均按 `2.0` 判断；这不是完整 PEP 440，epoch、通配符、`~=` 不支持。
+- 元数据缺失时保持原有目标解析/能力探测流程，不能据此认定版本匹配；已安装版本格式无法识别则跳过。
+  被 gate 排除的补丁在 `report()` 中为 `skipped`，`detail` 说明原因，`version_gates` 保留声明。
+  首次应用时同目标所有补丁均被排除，则不解析可能已被上游删除的符号。
+- `MEGATRON_MUSA_PATCH_IGNORE_VERSION_GATES=1`（也接受 `true` 或 `*`）放行全部版本门控；
+  `=transformer_engine,transformers` 只放行指定包；`0/false/off` 不放行。
+  这不会绕过 ONLY/DISABLE、依赖要求或源码/能力探针，也不会强制被工厂拒绝的补丁生效。
+  开关应在激活前设置；进程中修改开关不会撤销已安装包装或重新运行完成的 Hook。
+  改动后使用新进程，或对本包可逆部分执行 unapply/install。
+
+源码探针仅匹配当前厂商代码指纹，不执行模块；缺包或缺文件为 False，不可判定的布局为 None。
+目前调用方在 None 时保留兼容补丁，在 False 时退出；marker 因格式变化消失也可能触发退出，
+因此升级后仍要跑原始导入和数值回归。MoE topk 探针使用确定性输入并核对结果，不消耗训练 RNG。
+验证“上游已修复”应**禁用对应 patch** 后复跑原始用例；IGNORE_VERSION_GATES 是试用越界补丁的诊断开关。
