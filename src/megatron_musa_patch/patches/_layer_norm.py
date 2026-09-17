@@ -21,11 +21,20 @@ from .._engine import AttrPatch
 __all__ = ["PATCHES"]
 
 
-def _pure_torch_layer_norm(original: Any) -> Any:
-    """Build a fallback without importing torch until the target is available."""
+def _build_norm_fallback_class(base: Any = None, cast_to_input: bool = False) -> Any:
+    """The functional LayerNorm/RMSNorm class shared by the norm patches.
+
+    ``base`` (when given) is Megatron's local FusedLayerNorm; subclassing it
+    keeps ``isinstance`` checks and any consumer-authored class attributes.
+    ``cast_to_input`` mirrors TE's norm contract: parameters stay in their
+    created dtype while the output takes the input's dtype, so consumers that
+    feed the norm result straight into a TE op never see a dtype mismatch.
+    """
     import torch
 
-    class FusedLayerNorm(torch.nn.Module):
+    bases = (base,) if base is not None else (torch.nn.Module,)
+
+    class FusedLayerNorm(*bases):
         """Match Megatron's norm constructor and optimizer parameter markers.
 
         Config is authoritative, as in upstream FusedLayerNorm/TENorm. In
@@ -35,6 +44,7 @@ def _pure_torch_layer_norm(original: Any) -> Any:
         """
 
         _megatron_musa_patch_fallback = True
+        _cast_output_to_input = cast_to_input
 
         def __init__(
             self,
@@ -58,9 +68,16 @@ def _pure_torch_layer_norm(original: Any) -> Any:
             # This fallback never selects apex's persistent FastLayerNorm kernel.
             self.persist_layer_norm = False
 
-            self.weight = torch.nn.Parameter(torch.empty(self.hidden_size))
+            params_dtype = getattr(config, "params_dtype", None)
+            empty = (
+                (lambda *shape: torch.empty(*shape, dtype=params_dtype))
+                if params_dtype is not None
+                else torch.empty
+            )
+
+            self.weight = torch.nn.Parameter(empty(self.hidden_size))
             if self.normalization == "LayerNorm":
-                self.bias = torch.nn.Parameter(torch.empty(self.hidden_size))
+                self.bias = torch.nn.Parameter(empty(self.hidden_size))
             else:
                 self.register_parameter("bias", None)
             self.reset_parameters()
@@ -77,13 +94,22 @@ def _pure_torch_layer_norm(original: Any) -> Any:
 
         def forward(self, input):
             weight = self.weight + 1 if self.zero_centered_gamma else self.weight
+            bias = self.bias
+            if self._cast_output_to_input and weight.dtype != input.dtype:
+                weight = weight.to(input.dtype)
+                bias = bias.to(input.dtype) if bias is not None else None
             if self.normalization == "RMSNorm":
                 return torch.nn.functional.rms_norm(input, self.hidden_size, weight, self.eps)
             return torch.nn.functional.layer_norm(
-                input, self.hidden_size, weight, self.bias, self.eps
+                input, self.hidden_size, weight, bias, self.eps
             )
 
     return FusedLayerNorm
+
+
+def _pure_torch_layer_norm(original: Any) -> Any:
+    """Build a fallback without importing torch until the target is available."""
+    return _build_norm_fallback_class()
 
 
 def _using_torch_fallback() -> bool:
@@ -147,25 +173,42 @@ def _unfused_te_layer_norm_linear(original: Any) -> Any:
             # keeps RMSNorm's fused forward/backward and adds no runtime wrapper.
             # Other normalization values retain upstream validation as well.
             # deepcopy reconstructs modules via __new__(cls) without config.
+            #
+            # Only the exact base class may hand construction to the fused
+            # module. Subclasses (e.g. the heterogeneous
+            # TELayerNormColumnParallelLinearGathered) are built with a
+            # (config, tp_comm_buffer_name) signature the fused __init__ cannot
+            # accept; they must run their own constructor, which forwards real
+            # input/output sizes to this class.
             config = kwargs.get("config")
-            if config is not None and config.normalization != "LayerNorm":
+            if (
+                cls is _BASE_NORM_LINEAR
+                and config is not None
+                and config.normalization != "LayerNorm"
+            ):
                 return original(*args, **kwargs)
             return super().__new__(cls)
 
         def __init__(self, input_size, output_size, *, config, **kwargs):
             if kwargs.get("is_expert", False):
                 raise ValueError("Transformer Engine norm-linear layers do not support MoE")
+            if config.normalization not in ("LayerNorm", "RMSNorm"):
+                raise ValueError(f"Unsupported normalization: {config.normalization!r}")
             super().__init__(input_size, output_size, config=config, **kwargs)
-            self.normalization = "LayerNorm"
+            self.normalization = config.normalization
             self.eps = config.layernorm_epsilon
             self.zero_centered_gamma = config.layernorm_zero_centered_gamma
             self.layer_norm_weight = torch.nn.Parameter(torch.full(
                 (input_size,), 0.0 if self.zero_centered_gamma else 1.0,
                 dtype=config.params_dtype, device=self.weight.device,
             ))
-            self.layer_norm_bias = torch.nn.Parameter(torch.zeros(
-                input_size, dtype=config.params_dtype, device=self.weight.device,
-            ))
+            if self.normalization == "LayerNorm":
+                self.layer_norm_bias = torch.nn.Parameter(torch.zeros(
+                    input_size, dtype=config.params_dtype, device=self.weight.device,
+                ))
+            else:
+                # Match the fused module's RMSNorm layout: no norm bias.
+                self.register_parameter("layer_norm_bias", None)
             for parameter in (self.layer_norm_weight, self.layer_norm_bias):
                 if parameter is not None:
                     parameter.sequence_parallel = config.sequence_parallel
@@ -176,16 +219,122 @@ def _unfused_te_layer_norm_linear(original: Any) -> Any:
             # autocast x can differ from params_dtype; casts retain autograd.
             weight = self.layer_norm_weight.to(x.dtype)
             weight = weight + 1 if self.zero_centered_gamma else weight
-            normalized = torch.nn.functional.layer_norm(
-                x, (x.shape[-1],), weight, self.layer_norm_bias.to(x.dtype), self.eps,
-            )
+            if self.normalization == "RMSNorm":
+                normalized = torch.nn.functional.rms_norm(
+                    x, (x.shape[-1],), weight, self.eps
+                )
+            else:
+                normalized = torch.nn.functional.layer_norm(
+                    x, (x.shape[-1],), weight, self.layer_norm_bias.to(x.dtype), self.eps,
+                )
             return super().forward(normalized)
 
         # The upstream fused wrapper already handles metadata defaults and
         # shards only weight/bias, leaving layer_norm_* replicated.
         sharded_state_dict = original.sharded_state_dict
 
+    # Resolved after the class statement so __new__ can tell the exact base
+    # from subclasses without relying on the module attribute (which upstream
+    # consumers may rebind).
+    _BASE_NORM_LINEAR = TELayerNormColumnParallelLinear
+
     return TELayerNormColumnParallelLinear
+
+
+def _musa_live() -> bool:
+    import torch
+
+    musa = getattr(torch, "musa", None)
+    available = getattr(musa, "is_available", None)
+    return callable(available) and bool(available())
+
+
+def _te_norm_unfused(original: Any) -> Any:
+    """Build TENorm's norm with functional PyTorch ops on MUSA.
+
+    ``TENorm.__new__`` constructs ``te.pytorch.LayerNorm``/``RMSNorm``, whose
+    standalone norm op aborts on the affected MUSA stack (allocateSpace
+    assertion in transformer_engine ops/basic/layer_norm.py). The replacement
+    subclasses those TE modules -- so ``isinstance`` checks, parameter names,
+    dtypes, initialization and ``sharded_state_dict`` stay TE's -- and only
+    replaces ``forward`` with the functional implementation, casting the norm
+    parameters to the input dtype exactly like TE's kernel contract. TE_NORM=1
+    keeps upstream for upgrade validation.
+    """
+    import sys
+
+    from megatron.core.extensions.transformer_engine import HAVE_TE
+
+    if not HAVE_TE:
+        # Keep upstream's optional-dependency error.
+        return None
+    if not _musa_live() or _env.flag("TE_NORM", False):
+        return None
+
+    import numbers
+
+    import torch
+    import transformer_engine as te
+
+    module = sys.modules["megatron.core.extensions.transformer_engine"]
+    extra_kwargs_fn = getattr(module, "_get_extra_te_kwargs", None)
+
+    def build(te_cls, normalization):
+        class TENormFallback(te_cls):
+            _megatron_musa_patch_fallback = True
+
+            def __init__(self, config, hidden_size, eps=1e-5):
+                te_cls.__init__(
+                    self,
+                    hidden_size=hidden_size,
+                    eps=eps,
+                    sequence_parallel=config.sequence_parallel,
+                    zero_centered_gamma=config.layernorm_zero_centered_gamma,
+                    **(extra_kwargs_fn(config) if extra_kwargs_fn else {}),
+                )
+                self.config = config
+                self.normalization = normalization
+                self.hidden_size = torch.Size(
+                    (hidden_size,) if isinstance(hidden_size, numbers.Integral) else hidden_size
+                )
+
+            def forward(self, input):
+                weight = self.weight
+                if getattr(self, "zero_centered_gamma", False):
+                    weight = weight + 1
+                weight = weight.to(input.dtype)
+                if normalization == "LayerNorm":
+                    bias = self.bias.to(input.dtype)
+                    return torch.nn.functional.layer_norm(
+                        input, self.hidden_size, weight, bias, self.eps
+                    )
+                return torch.nn.functional.rms_norm(
+                    input, self.hidden_size, weight, self.eps
+                )
+
+        TENormFallback.__name__ = f"TENorm{normalization}Fallback"
+        return TENormFallback
+
+    layernorm_fallback = build(te.pytorch.LayerNorm, "LayerNorm")
+    rmsnorm_fallback = build(te.pytorch.RMSNorm, "RMSNorm")
+
+    class TENormMusa:
+        """Drop-in for upstream's TENorm conditional wrapper."""
+
+        _megatron_musa_patch_fallback = True
+
+        def __new__(cls, config, hidden_size, eps: float = 1e-5):
+            normalization = getattr(config, "normalization", "LayerNorm")
+            if normalization == "LayerNorm":
+                return layernorm_fallback(config, hidden_size, eps)
+            if normalization == "RMSNorm":
+                assert hasattr(te.pytorch, "RMSNorm"), (
+                    "Transformer-Engine >= v0.11 required to use this feature"
+                )
+                return rmsnorm_fallback(config, hidden_size, eps)
+            raise Exception("Only LayerNorm and RMSNorm are curently supported")
+
+    return TENormMusa
 
 
 PATCHES = (
@@ -202,8 +351,11 @@ PATCHES = (
         ),
         strategy=(
             "For LayerNorm only, use PyTorch normalization followed by TEColumnParallelLinear, "
-            "retaining FP8, TP, norm parameter names and sharding. "
-            "RMSNorm constructs the original TE fused module without a forward wrapper. "
+            "retaining FP8, TP, norm parameter names and sharding. The exact base class with a "
+            "non-LayerNorm config still constructs the original fused module; subclasses always "
+            "run their own constructor (the fused signature cannot accept their "
+            "(config, tp_comm_buffer_name) call shape) and this class then honors the config's "
+            "RMSNorm, matching the fused module's no-bias parameter layout. "
             "TE_FUSED_LAYERNORM=1 restores upstream for upgrade validation."
         ),
         upstream="NVIDIA/Megatron-LM megatron/core/extensions/transformer_engine.py",
@@ -294,6 +446,41 @@ PATCHES = (
             "Review on MT-TransformerEngine/torch_musa and Megatron upgrades; remove "
             "after BLOCK_LAYERNORM=upstream passes LayerNorm and RMSNorm final-block "
             "forward/backward, checkpoint and multi-rank sequence-parallel tests."
+        ),
+    ),
+    AttrPatch(
+        id="megatron.te.norm.unfused-musa",
+        target="megatron.core.extensions.transformer_engine:TENorm",
+        replace=_te_norm_unfused,
+        rationale=(
+            "TENorm constructs te.pytorch.LayerNorm/RMSNorm, whose standalone "
+            "norm op aborts on the affected MUSA stack with the allocateSpace "
+            "assertion (transformer_engine ops/basic/layer_norm.py reached from "
+            "TE's csrc allocator). 44 upstream cases fail this way: DSA "
+            "attention variants, MTP, LLaVA, CLIP ViT, the VLM controller and "
+            "spec customization, all of which build their standalone norms "
+            "through TENorm."
+        ),
+        strategy=(
+            "Replace the TENorm wrapper with subclasses of TE's own "
+            "LayerNorm/RMSNorm chosen from config.normalization, so isinstance "
+            "checks, parameter names, dtypes, initialization and "
+            "sharded_state_dict stay TE's, while forward runs the functional "
+            "norm with parameters cast to the input dtype (TE's kernel "
+            "contract). Upstream validation for unsupported normalization "
+            "values is retained. Only declines (keeping upstream) when TE is "
+            "absent, no MUSA runtime is live, or TE_NORM=1 requests the "
+            "upgrade-validation path."
+        ),
+        upstream=(
+            "NVIDIA/Megatron-LM megatron/core/extensions/transformer_engine.py:"
+            "TENorm; TransformerEngine ops/basic/layer_norm.py"
+        ),
+        remove_when=(
+            "Remove after the MUSA TransformerEngine standalone LayerNorm/RMSNorm "
+            "passes forward/backward, zero-centered gamma, meta materialization, "
+            "checkpoint key/sharding and multi-rank sequence-parallel tests; "
+            "re-run the 44 affected node ids with TE_NORM=1 before deleting."
         ),
     ),
 )

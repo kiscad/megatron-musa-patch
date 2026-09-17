@@ -129,6 +129,123 @@ def test_te_unavailable_skips_norm_linear_patch(engine, stub_module):
     assert engine.report()[0]['status'] == 'skipped'
 
 
+def _norm_linear_env(stub_module):
+    """Stub the TE extension module and return the patched class."""
+
+    class Linear(torch.nn.Module):
+        def __init__(self, input_size, output_size, *, config, **kwargs):
+            super().__init__()
+            self.weight = torch.nn.Parameter(torch.randn(output_size, input_size))
+
+        def forward(self, x):
+            return torch.nn.functional.linear(x, self.weight), None
+
+    def sharded(self, *args, **kwargs):
+        return self.state_dict()
+
+    stub_module('megatron.core.extensions.transformer_engine', HAVE_TE=True,
+                TEColumnParallelLinear=Linear)
+    original = SimpleNamespace(sharded_state_dict=sharded)
+    return _layer_norm._unfused_te_layer_norm_linear(original), original
+
+
+def _norm_config(normalization):
+    return SimpleNamespace(normalization=normalization, layernorm_epsilon=1e-5,
+                           layernorm_zero_centered_gamma=False, params_dtype=torch.float32,
+                           sequence_parallel=False, add_bias_linear=False)
+
+
+def test_subclass_constructs_itself_for_rmsnorm(stub_module):
+    """heterogeneous Gathered subclasses must not be routed to the fused class.
+
+    The fused signature needs positional input/output sizes; the Gathered
+    replacement is built as (config, tp_comm_buffer_name) and used to raise
+    ``missing 2 required positional arguments`` / ``unexpected layer_number``.
+    """
+    patched, original = _norm_linear_env(stub_module)
+    calls = []
+
+    class Gathered(patched):
+        def __init__(self, config, tp_comm_buffer_name, *args, **kwargs):
+            calls.append((config, tp_comm_buffer_name, args, kwargs))
+            super().__init__(
+                input_size=config.hidden_size, output_size=config.hidden_size,
+                config=config, gather_output=False, bias=config.add_bias_linear,
+                skip_bias_add=False, is_expert=False,
+                tp_comm_buffer_name=tp_comm_buffer_name,
+            )
+
+    config = _norm_config('RMSNorm')
+    config.hidden_size = 16
+    # Exact call shapes observed from the upstream heterogeneous builds.
+    module = Gathered(config=config, tp_comm_buffer_name='linear_attn')
+    assert type(module) is Gathered
+    assert isinstance(module, patched)
+    module = Gathered(config=config, tp_comm_buffer_name='linear_attn', layer_number=2)
+    assert type(module) is Gathered
+    assert calls[1][3] == {'layer_number': 2}
+
+    # RMSNorm matches the fused module's layout: norm weight, no norm bias.
+    assert module.layer_norm_bias is None
+    assert sum(p.numel() for p in module.parameters()) == 16 * 16 + 16
+
+    x = torch.randn(2, 16)
+    out, bias = module(x)
+    reference = torch.nn.functional.rms_norm(x, (16,), module.layer_norm_weight, 1e-5)
+    torch.testing.assert_close(out, torch.nn.functional.linear(reference, module.weight))
+    assert bias is None
+
+
+def test_subclass_with_layernorm_keeps_norm_bias(stub_module):
+    patched, _ = _norm_linear_env(stub_module)
+
+    class Gathered(patched):
+        def __init__(self, config, tp_comm_buffer_name, **kwargs):
+            super().__init__(
+                input_size=config.hidden_size, output_size=config.hidden_size,
+                config=config, gather_output=False, bias=False, skip_bias_add=False,
+                is_expert=False, tp_comm_buffer_name=tp_comm_buffer_name,
+            )
+
+    config = _norm_config('LayerNorm')
+    config.hidden_size = 16
+    module = Gathered(config=config, tp_comm_buffer_name='linear_mlp')
+    assert module.layer_norm_bias is not None
+    assert sum(p.numel() for p in module.parameters()) == 16 * 16 + 16 + 16
+    x = torch.randn(2, 16)
+    out, _ = module(x)
+    reference = torch.nn.functional.layer_norm(
+        x, (16,), module.layer_norm_weight, module.layer_norm_bias, 1e-5)
+    torch.testing.assert_close(out, torch.nn.functional.linear(reference, module.weight))
+
+
+def test_base_class_rmsnorm_still_uses_fused_module(stub_module):
+    patched, original = _norm_linear_env(stub_module)
+    constructed = []
+
+    class Fused(torch.nn.Module):
+        def __init__(self, *args, **kwargs):
+            super().__init__()
+            constructed.append((args, kwargs))
+
+        def forward(self, x):
+            return x
+
+    original_sharded = original.sharded_state_dict
+
+    class Original(Fused):
+        def sharded_state_dict(self, *args, **kwargs):
+            return original_sharded(self, *args, **kwargs)
+
+    stub_module('megatron.core.extensions.transformer_engine', HAVE_TE=True,
+                TEColumnParallelLinear=Fused)
+    patched = _layer_norm._unfused_te_layer_norm_linear(Original)
+    config = _norm_config('RMSNorm')
+    module = patched(16, 8, config=config)
+    assert type(module) is Original
+    assert constructed, 'exact base with RMSNorm must keep the fused construction'
+
+
 @pytest.mark.integration
 @pytest.mark.parametrize('ranks', [1, 2])
 def test_musa_fp8_norm_linear(ranks):

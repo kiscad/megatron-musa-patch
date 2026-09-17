@@ -25,6 +25,9 @@ Variable                           Meaning                               Default
 ``..._BLOCK_LAYERNORM``            ``upstream`` keeps                     ``local``
                                    ``LayerNormImpl = TENorm``.
 ``..._TE_FUSED_LAYERNORM``         ``1`` restores TE fused norm-linear. ``0``
+``..._TE_NORM``                    ``1`` keeps TE's standalone             ``0``
+                                   LayerNorm/RMSNorm (TENorm) instead of
+                                   the functional fallback.
 ``..._ROPE_FUSION``                ``0`` declines the apex fused-RoPE     ``1``
                                    fallback, keeping upstream's
                                    "apply_rope_fusion is not available"
