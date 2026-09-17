@@ -12,6 +12,7 @@ import importlib.metadata as md
 import logging
 import re
 import sys
+from functools import lru_cache
 from typing import Any
 
 from . import _env
@@ -28,6 +29,14 @@ __all__ = [
     "check_megatron_present",
     "split_target",
     "require_attr",
+    "distribution_version",
+    "te_version",
+    "torch_musa_version",
+    "transformers_version",
+    "module_source_contains",
+    "parse_version_gate",
+    "check_version_gate",
+    "validate_version_gates",
 ]
 
 logger = logging.getLogger("megatron_musa_patch")
@@ -207,6 +216,93 @@ def split_target(target: str) -> tuple[str, str]:
     return module, attr
 
 
+def distribution_version(name: str) -> str | None:
+    """Installed version of an external distribution, or ``None``.
+
+    Used by patches whose applicability is tied to a specific broken range of
+    a vendor package (torch_musa, transformer_engine, transformers, ...).
+    Version strings are advisory here: the MUSA forks are known to report
+    numbers that do not follow the upstream API timeline, so callers must
+    pair these with a capability or source probe whenever one exists.
+    """
+    try:
+        return md.version(name)
+    except md.PackageNotFoundError:
+        return None
+
+
+def te_version() -> str | None:
+    """Version string of the installed Transformer Engine (MUSA fork)."""
+    for name in ("transformer_engine", "transformer_engine_cu12", "transformer-engine"):
+        version = distribution_version(name)
+        if version is not None:
+            return version
+    return None
+
+
+def torch_musa_version() -> str | None:
+    """Version string of the installed torch_musa package."""
+    return distribution_version("torch_musa")
+
+
+def transformers_version() -> str | None:
+    """Version string of the installed transformers package."""
+    return distribution_version("transformers")
+
+
+def module_source_contains(module_name: str, *markers: str) -> bool | None:
+    """Check markers in a module's source **without executing the module**.
+
+    Several MUSA-fork defects this package works around are identified by
+    exact code patterns whose presence depends on the vendor build, and the
+    vendor version strings do not follow the upstream API timeline.  Reading
+    source markers provide a conservative build fingerprint, not proof of
+    kernel correctness. The probe never runs the module body.
+
+    Dotted names are resolved from the top-level package's spec by joining
+    the remaining parts as file paths -- resolving a submodule through the
+    import system would import (and execute) its parents.
+
+    Returns ``True`` when every marker appears in the source, ``False`` when
+    the source is readable and any marker is missing, and ``None`` when the
+    probe cannot decide (unsupported layout or unreadable source).
+    A missing package or submodule returns False.
+    Callers choose their own policy for the unknown case.
+    """
+    if not markers:
+        raise ValueError("module_source_contains requires at least one marker")
+    parts = module_name.split(".")
+    try:
+        spec = find_spec_without_watchers(parts[0])
+    except Exception:  # noqa: BLE001 - a broken lookup is an undecided probe
+        return None
+    if spec is None:
+        return False  # the top-level package is genuinely absent
+    origin = getattr(spec, "origin", None)
+    if not origin or not origin.endswith(".py"):
+        return None  # namespace/zip layout: undecidable without executing
+    from pathlib import Path
+
+    if len(parts) == 1:
+        target = Path(origin)
+    elif not getattr(spec, "submodule_search_locations", None):
+        return False
+    else:
+        target = Path(origin).parent.joinpath(*parts[1:])
+    if target.is_dir():
+        target = target / "__init__.py"
+    elif not target.exists():
+        target = target.with_name(target.name + ".py") if not target.name.endswith(".py") else target
+    if not target.exists():
+        return False  # submodule file genuinely absent
+    try:
+        with open(target, "r", encoding="utf-8", errors="replace") as handle:
+            source = handle.read()
+    except OSError:
+        return None
+    return all(marker in source for marker in markers)
+
+
 def require_attr(module: Any, dotted: str, *, patch_id: str = "<unknown>") -> Any:
     """Return ``module.a.b.c`` or raise :class:`PatchTargetMissing`."""
     obj: Any = module
@@ -223,3 +319,75 @@ def require_attr(module: Any, dotted: str, *, patch_id: str = "<unknown>") -> An
                 detail="attribute lookup failed",
             ) from None
     return obj
+
+
+#: Comparison operators accepted in declarative version gates.
+_GATE_OPS = {
+    ">=": lambda a, b: a >= b,
+    ">": lambda a, b: a > b,
+    "<=": lambda a, b: a <= b,
+    "<": lambda a, b: a < b,
+    "==": lambda a, b: a == b,
+    "!=": lambda a, b: a != b,
+}
+
+
+@lru_cache(maxsize=256)
+def parse_version_gate(spec: str) -> tuple[str, tuple[tuple[str, tuple[int, ...]], ...]]:
+    """Parse AND-ed numeric release bounds; this is not PEP 440 ordering.
+
+    Bounds contain only dot-separated integers. Installed prerelease/local
+    suffixes are ignored deliberately, like the existing Megatron version
+    guard. Parsing is cached, but environment and installed metadata are not.
+    """
+    match = re.fullmatch(r"\s*([A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?)\s*(.+?)\s*", spec)
+    if match is None:
+        raise ValueError(f"malformed version gate: {spec!r}")
+    name, remainder = match.groups()
+    checks = []
+    for part in remainder.split(","):
+        comparison = re.fullmatch(r"\s*(>=|<=|==|!=|>|<)\s*([0-9]+(?:\.[0-9]+)*)\s*", part)
+        if comparison is None:
+            raise ValueError(f"malformed comparison {part!r} in gate: {spec!r}")
+        op, release = comparison.groups()
+        checks.append((op, tuple(map(int, release.split(".")))))
+    return _env.normalize_distribution_name(name), tuple(checks)
+
+
+def validate_version_gates(gates: tuple[str, ...]) -> None:
+    """Shared declaration validation for AttrPatch and HookPatch."""
+    if not isinstance(gates, tuple) or any(not isinstance(g, str) for g in gates):
+        raise ValueError("version_gates must be a tuple of gate strings")
+    for gate in gates:
+        parse_version_gate(gate)
+
+
+def check_version_gate(spec: str) -> tuple[bool, str]:
+    """Return (blocked, detail) using installed metadata, without imports.
+
+    Missing metadata preserves existing target/capability handling; malformed
+    installed versions block rather than accidentally satisfying an upper bound.
+    Ignore switches affect only version gates, never capability probes or ONLY.
+    """
+    name, checks = parse_version_gate(spec)
+    overrides = _env.version_gate_overrides()
+    if "*" in overrides or name in overrides:
+        return False, f"gate overridden by {_env.ENV_PREFIX}_IGNORE_VERSION_GATES: {spec}"
+    installed = distribution_version(name)
+    if installed is None:
+        return False, f"{name} metadata unavailable (gate {spec} not enforced)"
+    match = re.fullmatch(
+        r"([0-9]+(?:\.[0-9]+)*)(?:(?:a|b|rc|[.-]?(?:dev|post))[0-9]*)*"
+        r"(?:\+[A-Za-z0-9]+(?:[._-][A-Za-z0-9]+)*)?",
+        installed,
+    )
+    if match is None:
+        return True, f"{name} has an unrecognized version {installed!r} (gate {spec})"
+    version = tuple(map(int, match.group(1).split(".")))
+    for op, bound in checks:
+        width = max(len(version), len(bound))
+        actual = version + (0,) * (width - len(version))
+        expected = bound + (0,) * (width - len(bound))
+        if not _GATE_OPS[op](actual, expected):
+            return True, f"{name} {installed} outside declared range ({spec})"
+    return False, f"{name} {installed} within {spec}"

@@ -28,6 +28,11 @@ Variable                           Meaning                               Default
 ``..._TE_NORM``                    ``1`` keeps TE's standalone             ``0``
                                    LayerNorm/RMSNorm (TENorm) instead of
                                    the functional fallback.
+``..._IGNORE_VERSION_GATES``       ``1`` disables every declarative       *(empty)*
+                                   version gate; a comma-separated list
+                                   of package names bypasses only those
+                                   packages (e.g. ``transformer_engine``)
+                                   for trialling an out-of-range build.
 ``..._ROPE_FUSION``                ``0`` declines the apex fused-RoPE     ``1``
                                    fallback, keeping upstream's
                                    "apply_rope_fusion is not available"
@@ -47,6 +52,7 @@ Variable                           Meaning                               Default
 from __future__ import annotations
 
 import os
+import re
 
 __all__ = [
     "ENV_PREFIX",
@@ -128,3 +134,27 @@ def patch_enabled(patch_id: str) -> bool:
     if only:
         return patch_id in only
     return patch_id not in disabled_ids()
+
+
+def normalize_distribution_name(name: str) -> str:
+    """Use distribution-name equivalence for metadata and override lists."""
+    return re.sub(r"[-_.]+", "-", name).lower()
+
+
+def version_gate_overrides() -> frozenset[str]:
+    """Packages whose declarative version gates are forcibly satisfied.
+
+    ``..._IGNORE_VERSION_GATES=1`` (or ``true``) overrides every gate;
+    a comma-separated list of package names overrides only those packages.
+    Used to trial a workaround outside its declared applicability range.
+    """
+    raw = os.environ.get(_env_name("IGNORE_VERSION_GATES"))
+    if not raw:
+        return frozenset()
+    raw = raw.strip().lower()
+    if raw in _FALSY:
+        return frozenset()
+    if raw in _TRUTHY:
+        return frozenset({"*"})
+    return frozenset(normalize_distribution_name(part.strip())
+                     for part in raw.split(",") if part.strip())

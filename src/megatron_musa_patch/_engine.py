@@ -27,6 +27,8 @@ from ._compat import (
     megatron_version,
     require_attr,
     split_target,
+    validate_version_gates,
+    check_version_gate,
 )
 from ._errors import MegatronMusaPatchError, PatchConflict
 
@@ -61,6 +63,12 @@ class AttrPatch:
     # Required companion patches on other targets in this same module. These
     # are ordered explicitly, never enabled implicitly by ONLY/DISABLE.
     requires: tuple[str, ...] = ()
+    # Declarative applicability gates, e.g. ("transformer_engine >=2.0,<2.1",).
+    # Evaluated by the engine at apply time against installed distributions;
+    # a blocked gate skips the patch with the reason in the report. Pair a
+    # version gate with a capability probe whenever the vendor's version
+    # numbering does not track its API.
+    version_gates: tuple[str, ...] = ()
 
     @property
     def module_name(self) -> str:
@@ -86,6 +94,7 @@ class AttrPatch:
             not isinstance(item, str) or not item or item == self.id for item in self.requires
         ):
             raise ValueError("requires must contain nonempty companion patch ids, not self")
+        validate_version_gates(self.version_gates)
 
 
 @dataclass(frozen=True)
@@ -106,6 +115,8 @@ class HookPatch:
     remove_when: str = ""
     strategy: str = ""
     undo: Callable[[], None] | None = None
+    # Declarative applicability gates, evaluated by the engine before run().
+    version_gates: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if not self.trigger or not all(part.isidentifier() for part in self.trigger.split(".")):
@@ -114,6 +125,7 @@ class HookPatch:
             raise TypeError("HookPatch.run must be callable")
         if self.undo is not None and not callable(self.undo):
             raise TypeError("HookPatch.undo must be callable")
+        validate_version_gates(self.version_gates)
 
 
 Patch = Union[AttrPatch, HookPatch]
@@ -133,6 +145,7 @@ class AppliedPatch:
             "id": patch.id,
             "kind": "attr" if isinstance(patch, AttrPatch) else "hook",
             "target": patch.target if isinstance(patch, AttrPatch) else f"{patch.trigger} (hook)",
+            "version_gates": list(patch.version_gates),
             "status": self.status,
             "detail": self.detail,
             "rationale": patch.rationale,
@@ -391,6 +404,11 @@ class Engine:
                 if record.status in {"applied", "skipped"}:
                     continue
                 try:
+                    gate_detail = self._version_gate_block(patch)
+                    if gate_detail is not None:
+                        record.status, record.detail = "skipped", f"version gate: {gate_detail}"
+                        self._log(record)
+                        continue
                     result = patch.run()
                 except Exception as exc:
                     record.status, record.detail = "failed", f"{type(exc).__name__}: {exc}"
@@ -424,12 +442,30 @@ class Engine:
         for attr in groups:
             apply_target(attr)
 
+    @staticmethod
+    def _version_gate_block(patch: Patch) -> str | None:
+        """Detail of the first blocked declarative version gate, or None."""
+        for gate in patch.version_gates:
+            blocked, detail = check_version_gate(gate)
+            if blocked:
+                return detail
+        return None
+
     def _apply_target(self, module, attr: str, patches: list[AttrPatch], trigger: str) -> None:
         key = (module.__name__, attr)
         previous = self._bindings.get(key)
         active = patches[0]
         mutations = []
         try:
+            gates = {p.id: self._version_gate_block(p) for p in patches}
+            # A version excluded by every patch may have removed the symbol.
+            # No binding to restore means there is nothing to resolve or mutate.
+            if previous is None and all(detail is not None for detail in gates.values()):
+                for patch in patches:
+                    record = self._records[patch.id]
+                    record.status, record.detail = "skipped", f"version gate: {gates[patch.id]}"
+                    self._log(record)
+                return
             owner_path, _, leaf = attr.rpartition(".")
             owner = require_attr(module, owner_path, patch_id=active.id) if owner_path else module
             require_attr(module, attr, patch_id=active.id)
@@ -450,6 +486,10 @@ class Engine:
             baseline = current
             outcomes = []
             for active in patches:
+                gate_detail = gates[active.id]
+                if gate_detail is not None:
+                    outcomes.append((active, "skipped", f"version gate: {gate_detail}"))
+                    continue
                 unavailable = [pid for pid in active.requires if not self.is_applied(pid)]
                 if unavailable:
                     outcomes.append((active, "skipped", "requires applied companion(s): " + ", ".join(unavailable)))

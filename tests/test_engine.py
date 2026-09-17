@@ -356,3 +356,101 @@ def test_dot_form_target_splits_on_last_component(engine, stub_module):
     engine.register([patch])
     engine.install()
     assert module.value == 2
+
+
+@pytest.fixture
+def gate_metadata(monkeypatch):
+    from megatron_musa_patch import _compat
+    monkeypatch.setattr(_compat, "distribution_version", lambda name: "5.16.1")
+
+
+def test_version_gate_skips_attr_patch_via_engine(engine, monkeypatch, stub_module, gate_metadata):
+    monkeypatch.setenv('MEGATRON_MUSA_PATCH', '1')
+
+    """A blocked declarative gate skips the patch with the reason recorded."""
+    import sys
+
+    original = object()
+    module = stub_module("fake.mod", thing=original)
+    engine.register([AttrPatch(
+        id="fake.gated",
+        target="fake.mod:thing",
+        replace=lambda current: ("replaced",),
+        version_gates=("transformers>=999",),
+    )])
+    engine.install()
+    engine._apply_for_module(module.__name__, module, trigger="already-imported")
+    record = next(r for r in engine.report() if r["id"] == "fake.gated")
+    assert record["status"] == "skipped"
+    assert "version gate" in record["detail"] and "transformers" in record["detail"]
+    # A skipped patch never replaces the binding.
+    assert module.thing is original
+
+
+def test_version_gate_applies_within_range(engine, monkeypatch, stub_module, gate_metadata):
+    monkeypatch.setenv('MEGATRON_MUSA_PATCH', '1')
+
+    module = stub_module("fake.mod2", thing=object())
+    engine.register([AttrPatch(
+        id="fake.gated2",
+        target="fake.mod2:thing",
+        replace=lambda current: ("replaced",),
+        version_gates=("transformers>=5",),
+    )])
+    engine.install()
+    engine._apply_for_module(module.__name__, module, trigger="already-imported")
+    record = next(r for r in engine.report() if r["id"] == "fake.gated2")
+    assert record["status"] == "applied", record
+    assert module.thing == ("replaced",)
+
+
+def test_version_gate_overrides_env(engine, monkeypatch, stub_module, gate_metadata):
+    monkeypatch.setenv('MEGATRON_MUSA_PATCH', '1')
+
+    """..._IGNORE_VERSION_GATES=transformers forces the gate to pass."""
+    module = stub_module("fake.mod3", thing=object())
+    monkeypatch.setenv("MEGATRON_MUSA_PATCH_IGNORE_VERSION_GATES", "transformers")
+    engine.register([AttrPatch(
+        id="fake.gated3",
+        target="fake.mod3:thing",
+        replace=lambda current: ("replaced",),
+        version_gates=("transformers>=999",),
+    )])
+    engine.install()
+    engine._apply_for_module(module.__name__, module, trigger="already-imported")
+    record = next(r for r in engine.report() if r["id"] == "fake.gated3")
+    assert record["status"] == "applied", record
+    assert module.thing == ("replaced",)
+
+
+def test_version_gate_skips_hook_via_engine(engine, monkeypatch, stub_module, gate_metadata):
+    monkeypatch.setenv('MEGATRON_MUSA_PATCH', '1')
+
+    """Hooks honour declarative gates too, recorded as skipped."""
+    module = stub_module("fake.hookmod")
+    ran = []
+    engine.register([HookPatch(
+        id="fake.hook-gated",
+        trigger="fake.hookmod",
+        run=lambda: ran.append(1),
+        undo=lambda: None,
+        version_gates=("transformers>=999",),
+    )])
+    engine.install()
+    importlib.import_module("fake.hookmod")
+    assert ran == []
+    record = next(r for r in engine.report() if r["id"] == "fake.hook-gated")
+    assert record["status"] == "skipped"
+    assert "version gate" in record["detail"]
+
+
+def test_version_gate_malformed_spec_rejected():
+    with pytest.raises(ValueError):
+        AttrPatch(id="x", target="fake.m:attr", replace=lambda c: c,
+                  version_gates=("transformer_engine >>2.0",))
+    with pytest.raises(ValueError):
+        AttrPatch(id="x", target="fake.m:attr", replace=lambda c: c,
+                  version_gates=("transformer_engine",))
+    with pytest.raises(ValueError):
+        HookPatch(id="y", trigger="fake.m", run=lambda: None,
+                  version_gates=("transformer_engine <abc",))
