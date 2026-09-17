@@ -64,15 +64,21 @@ def test_te_padding_mask_normalization():
     """Megatron mask forms map onto the shapes TE's get_full_mask consumes."""
     q_pad = torch.tensor([[False, False, True], [False] * 3])
     k_pad = torch.tensor([[False, True, True], [False] * 3])
-    # Self-attention tuple merges into one token-level vector [b, 1, 1, sk].
-    merged = _attention._te_padding_mask((q_pad, k_pad), 3, 3)
-    assert merged.shape == (2, 1, 1, 3)
-    assert torch.equal(merged[:, 0, 0], q_pad | k_pad)
-    # Cross-attention tuple keeps two [b, 1, 1, s] tensors.
+    # Distinct Q/K masks cannot be collapsed into a self-attention vector.
+    assert _attention._te_padding_mask((q_pad, k_pad), 3, 3) is None
+    same = _attention._te_padding_mask((q_pad, q_pad), 3, 3)
+    assert torch.equal(same[:, 0, 0], q_pad)
+    # Equal sequence lengths do not turn cross-attention into self-attention.
+    cross = _attention._te_padding_mask((q_pad, k_pad), 3, 3, "cross")
+    assert torch.equal(cross[0][:, 0, 0], q_pad)
+    assert torch.equal(cross[1][:, 0, 0], k_pad)
     k_pad5 = torch.tensor([[False] + [True] * 4, [False] * 5])
-    cross = _attention._te_padding_mask((q_pad, k_pad5), 3, 5)
+    cross = _attention._te_padding_mask((q_pad, k_pad5), 3, 5, "cross")
     assert isinstance(cross, tuple) and all(m.shape == (2, 1, 1, s)
                                            for m, s in zip(cross, (3, 5)))
+    assert _attention._te_padding_mask(torch.zeros(2, 1, 3, 3, dtype=torch.bool), 3, 3) is None
+    assert _attention._te_padding_mask((), 3, 3) is None
+    assert _attention._te_padding_mask(k_pad, 3, 5) is None
     # Single masks: 2D and [b, 1, sk] become [b, 1, 1, sk].
     assert _attention._te_padding_mask(k_pad, 3, 3).shape == (2, 1, 1, 3)
     assert _attention._te_padding_mask(k_pad[:, None, :], 3, 3).shape == (2, 1, 1, 3)
@@ -146,9 +152,7 @@ def _fp64_reference(q, k, v, causal=True):
 
 
 def test_musa_bf16_training_delegates_to_native_flash(musa_live):
-    """Regression guard for the llama3 8k-token OOM: BF16 training with a
-    supported head dim must reach the native flash path untouched (O(S)
-    memory), not any O(S^2) recomputation."""
+    """BF16 training with a supported head dim runs the native flash path."""
     _device_required()
     torch.manual_seed(17)
     q, k, v = [torch.randn(4, 1, 2, 64, device='musa', dtype=torch.bfloat16,
@@ -292,3 +296,34 @@ def test_musa_padding_tuple_mask_routes_to_unfused(musa_live):
         assert torch.count_nonzero(out4[length:, b]) == 0
     del module, q, k, v, out, out4
     torch.musa.empty_cache()
+
+
+@pytest.mark.parametrize('mask_name', ['causal_bottom_right', 'padding_causal_bottom_right'])
+def test_packed_preserves_bottom_right_causal_alignment(monkeypatch, mask_name):
+    q = torch.zeros(2, 1, 1)
+    k = torch.zeros(3, 1, 1)
+    v = torch.tensor([1., 2., 6.]).reshape(3, 1, 1)
+    packed = SimpleNamespace(cu_seqlens_q=torch.tensor([0, 2]),
+                             cu_seqlens_kv=torch.tensor([0, 3]))
+
+    def dispatch(module, query, key, value, mask, enum, name, bias, layout, original):
+        diagonal = key.shape[0] - query.shape[0] if name.endswith('bottom_right') else 0
+        allowed = torch.ones(query.shape[0], key.shape[0], dtype=torch.bool).tril(diagonal)
+        weights = allowed.float() / allowed.sum(-1, keepdim=True)
+        return (weights @ value[:, 0, 0]).reshape(query.shape[0], 1, 1, 1)
+
+    monkeypatch.setattr(_attention, '_dense_dispatch', dispatch)
+    out = _attention._packed_forward(SimpleNamespace(), q, k, v, mask_name, packed, None)
+    torch.testing.assert_close(out[:, 0], torch.tensor([1.5, 3.]))
+
+
+def test_capability_dispatch_declines_when_te_selects_by_capability(monkeypatch):
+    """No hard-coded flash in TE -> the vendor path handles every case."""
+    from megatron_musa_patch import _compat
+
+    monkeypatch.setattr(_attention, "_musa_live", lambda: True)
+    monkeypatch.setattr(_compat, "module_source_contains",
+                        lambda name, *m: False)
+    original = object()
+    # Decline = the factory returns None; the engine keeps the original.
+    assert _attention._tedpa_forward(original) is None

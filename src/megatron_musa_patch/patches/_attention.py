@@ -12,6 +12,7 @@ from __future__ import annotations
 import functools
 from typing import Any
 
+from .. import _compat
 from .._engine import AttrPatch
 
 __all__ = ["PATCHES"]
@@ -110,7 +111,7 @@ def _dispatch_contract(self, query, key, value, packed, num_splits):
     return True
 
 
-def _te_padding_mask(attention_mask, sq, sk):
+def _te_padding_mask(attention_mask, sq, sk, attention_type="self"):
     """Normalize Megatron padding masks to the shapes TE's ``get_full_mask`` consumes.
 
     TE derives the combined query|key mask from a single ``[b, 1, 1, sk]``
@@ -126,25 +127,35 @@ def _te_padding_mask(attention_mask, sq, sk):
             return mask[:, None, None, :]
         if mask.dim() == 3 and mask.shape[1] == 1:
             return mask[:, None, :, :]
-        if mask.dim() == 4 and mask.shape[1] == 1:
+        if mask.dim() == 4 and mask.shape[1:3] == (1, 1):
             return mask
         return None
 
     masks = attention_mask if isinstance(attention_mask, tuple) else (attention_mask,)
-    if any(m.dtype != torch.bool for m in masks):
+    if len(masks) not in (1, 2) or any(
+        not isinstance(m, torch.Tensor) or m.dtype != torch.bool for m in masks
+    ):
         return None
-    if len(masks) == 2:
-        q_mask, k_mask = masks
-        if sq == sk and q_mask.shape[-1] == sq and k_mask.shape[-1] == sk:
-            # TE derives the q|k mask from one token-level vector when sq == sk.
-            combined = torch.logical_or(q_mask.reshape(q_mask.shape[0], -1),
-                                        k_mask.reshape(k_mask.shape[0], -1))
-            return combined[:, None, None, :]
-        q_shaped, k_shaped = shaped(q_mask), shaped(k_mask)
-        if q_shaped is None or k_shaped is None:
+    shaped_masks = tuple(shaped(m) for m in masks)
+    if any(m is None for m in shaped_masks):
+        return None
+    if attention_type == "cross":
+        if len(shaped_masks) != 2:
             return None
-        return (q_shaped, k_shaped)
-    return shaped(masks[0])
+        q_mask, k_mask = shaped_masks
+        if (q_mask.shape[-1] != sq or k_mask.shape[-1] != sk
+                or q_mask.shape[0] != k_mask.shape[0]):
+            return None
+        return q_mask, k_mask
+    if attention_type != "self" or sq != sk:
+        return None
+    if any(m.shape[-1] != sk for m in shaped_masks):
+        return None
+    if len(shaped_masks) == 2 and not torch.equal(*shaped_masks):
+        # One self-attention token mask cannot represent distinct Q/K masks.
+        # OR-ing the vectors would silently mask additional valid queries/keys.
+        return None
+    return shaped_masks[0]
 
 
 def _unfused_forward(self, query, key, value, attention_mask, mask_name,
@@ -159,7 +170,9 @@ def _unfused_forward(self, query, key, value, attention_mask, mask_name,
         sq, sk = query.shape[0], key.shape[0]
     mask = None
     if "padding" in mask_name:
-        mask = _te_padding_mask(attention_mask, sq, sk)
+        mask = _te_padding_mask(
+            attention_mask, sq, sk, getattr(backend, "attention_type", "self")
+        )
         if mask is None:
             return None
     elif attention_mask is not None:
@@ -230,8 +243,10 @@ def _packed_forward(self, query, key, value, mask_name, packed, original):
     if len(q_spans) != len(k_spans) or key.shape[0] != value.shape[0]:
         raise ValueError("Packed query/key/value sequences must match")
     # Spans hold only valid tokens, so the padding qualifier is meaningless
-    # per span; packing semantics are plain per-sequence causal.
-    span_mask = "causal" if "causal" in mask_name else "no_mask"
+    # per span; retain causal alignment, including rectangular bottom-right.
+    span_mask = mask_name.removeprefix("padding_")
+    if span_mask == "padding":
+        span_mask = "no_mask"
     outputs = []
     for (qs, nq, capacity), (ks, nk, _) in zip(q_spans, k_spans):
         # clone() detaches the span from the packed storage: TE's layout probe
@@ -255,6 +270,21 @@ def _packed_forward(self, query, key, value, mask_name, packed, original):
 
 
 def _tedpa_forward(original: Any) -> Any:
+    """Wrap TEDotProductAttention.forward, or decline when not applicable.
+
+    The dispatch exists because MT-TE hard-codes ``use_flash_attention = True``
+    in ``transformer_engine/musa/pytorch/attention.py``. When the fingerprint
+    is absent this patch declines; that alone does not prove native THD,
+    dropout or backward correctness. Revalidate those paths after upgrading.
+    """
+    hardcoded_flash = _compat.module_source_contains(
+        "transformer_engine.musa.pytorch.attention", "use_flash_attention = True")
+    if hardcoded_flash is False:
+        _compat.logger.info(
+            "capability-dispatch declined: transformer_engine no longer "
+            "hard-codes use_flash_attention (te=%s)", _compat.te_version())
+        return None
+
     @functools.wraps(original)
     def forward(self, query, key, value, attention_mask, attn_mask_type,
                 attention_bias=None, packed_seq_params=None, num_splits=None):
@@ -297,10 +327,12 @@ PATCHES = (
             "dimensions 64..192, traps on the device when dropout_p > 0, and "
             "its wrapper drops cu_seqlens so padded THD batches produce NaN. "
             "Measured on MT-TE 2.0.0 / torch_musa 2.7.1 / flash-attn 2.6.3 "
-            "with Megatron core_v0.16.1. External attention interfaces cannot "
-            "fill these gaps: flash_attn dense exposes no autograd, "
-            "flash_attn/mate varlen backward fails to JIT-compile (tilelang "
-            "bugs), and MuDNN flash rejects FP32 ('Unsupport Type FLOAT')."
+            "with Megatron core_v0.16.1. External attention interfaces still "
+            "cannot fill these gaps: mate varlen (0.2.6 + tilelang_musa "
+            "0.1.12) exposes neither dropout nor padded-THD physical offsets, "
+            "flash_attn dense asserts dropout_p == 0 and its GQA backward "
+            "fails unreproducibly across identical fresh processes, and MuDNN "
+            "flash rejects FP32 ('Unsupport Type FLOAT')."
         ),
         strategy=(
             "Dispatch by kernel capability, implementing no attention math: "
@@ -315,7 +347,9 @@ PATCHES = (
             "unrecognized masks give up so the vendor error surfaces. CP, "
             "FP8 DPA, special softmax, windowed attention and max-logit "
             "remain upstream. The unfused route costs O(S^2) memory; THD "
-            "slicing adds one host sync of cu_seqlens metadata."
+            "slicing adds one host sync of cu_seqlens metadata. Declines "
+            "entirely when the TE hard-coded flash marker is gone (source "
+            "probe)."
         ),
         upstream=(
             "NVIDIA/Megatron-LM megatron/core/extensions/transformer_engine.py:"
