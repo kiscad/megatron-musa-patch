@@ -13,6 +13,7 @@ import functools
 import logging
 from typing import Any
 
+from .. import _compat
 from .._engine import AttrPatch
 
 __all__ = ["PATCHES"]
@@ -72,7 +73,33 @@ class _MoeTorchProxy:
         return self._torch.topk(input, k, dim=dim, largest=largest, sorted=sorted)
 
 
+def _fp64_topk_works_on_musa() -> bool:
+    """Capability probe: does this torch_musa build serve fp64 topk?
+
+    The patch exists because MuDNN topk rejects float64; a torch_musa build
+    that runs the probe no longer needs the CPU-reference detour. Probed at each patch application (megatron is imported by then, so the
+    device layer is active).
+    """
+    import torch
+
+    try:
+        values, indices = torch.topk(torch.arange(8, device="musa", dtype=torch.float64), 2)
+        if values.cpu().tolist() != [7.0, 6.0] or indices.cpu().tolist() != [7, 6]:
+            return False
+    except Exception as exc:  # noqa: BLE001 - any failure means still broken
+        _compat.logger.info(
+            "moe topk fp64 probe failed, keeping the reference path (%s: %s)",
+            type(exc).__name__, exc)
+        return False
+    _compat.logger.info(
+        "moe topk fp64-reference declined: fp64 topk works on this "
+        "torch_musa build (%s)", _compat.torch_musa_version())
+    return True
+
+
 def _moe_torch_namespace(original: Any) -> Any:
+    if _musa_live() and _fp64_topk_works_on_musa():
+        return None
     return _MoeTorchProxy(original)
 
 
@@ -165,7 +192,10 @@ PATCHES = (
             "through it. dim/largest/sorted and the (values, indices) contract "
             "are preserved, out= is delegated, and every other torch attribute "
             "forwards untouched. Non-float64 inputs and non-MUSA runtimes use "
-            "the native kernel."
+            "the native kernel. "
+            "Declines when an fp64-topk capability probe passes "
+            "on this torch_musa build; this small probe is not a full kernel test."
+
         ),
         upstream=(
             "NVIDIA/Megatron-LM megatron/core/transformer/moe/moe_utils.py "

@@ -126,3 +126,13 @@ def test_availability_flags_require_installed_fallback(stub_module, norm_class, 
     stub_module("megatron.core.fusions.fused_layer_norm", FusedLayerNorm=local_class)
     assert _layer_norm._fallback_available_flag(False) is (True if installed else None)
     assert _layer_norm._persistent_available_flag(True) is (False if installed else None)
+
+
+def test_layer_norm_te_patches_declare_te_version_gates():
+    """The three TE-abort fallbacks carry the declarative 2.0.x gate."""
+    gated = {p.id: p.version_gates for p in _layer_norm.PATCHES
+             if p.id in ("megatron.te.layer-norm-linear.unfused",
+                         "megatron.transformer-block.layer-norm.impl-local",
+                         "megatron.te.norm.unfused-musa")}
+    assert len(gated) == 3
+    assert all(g == ("transformer_engine >=2.0,<2.1",) for g in gated.values())

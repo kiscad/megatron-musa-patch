@@ -148,3 +148,41 @@ def test_unpermute_requires_its_permute_companion(stub_module):
     wrapped = unpermute.replace(original)
     assert wrapped(tensor, "idx", torch.Size([4, 2]), fused=True) == "restored"
     assert calls[-1] is False
+
+
+def test_moe_topk_declines_when_fp64_topk_works(monkeypatch):
+    from megatron_musa_patch import _compat
+    from megatron_musa_patch.patches import _moe
+
+    monkeypatch.setattr(_moe, "_musa_live", lambda: True)
+    monkeypatch.setattr(_moe, "_fp64_topk_works_on_musa", lambda: True)
+    original = object()
+    # Decline = replace() returns None; the engine then keeps the original.
+    assert _moe._moe_torch_namespace(original) is None
+
+
+def test_moe_topk_probe_failure_keeps_fallback(monkeypatch):
+    from megatron_musa_patch.patches import _moe
+
+    monkeypatch.setattr(_moe, "_musa_live", lambda: True)
+    monkeypatch.setattr(_moe, "_fp64_topk_works_on_musa", lambda: False)
+    original = object()
+    assert isinstance(_moe._moe_torch_namespace(original), _moe._MoeTorchProxy)
+
+
+@pytest.mark.parametrize("broken", [False, True])
+def test_topk_capability_probe_preserves_rng(monkeypatch, broken):
+    from megatron_musa_patch.patches import _moe
+
+    # Route the probe's allocation to CPU; this checks probe side effects,
+    # independent of whether the installed MUSA kernel supports float64.
+    original_arange = torch.arange
+    monkeypatch.setattr(torch, "arange", lambda *args, **kwargs: original_arange(
+        *args, **dict(kwargs, device="cpu")))
+    if broken:
+        def fail(*args, **kwargs):
+            raise RuntimeError("unsupported")
+        monkeypatch.setattr(torch, "topk", fail)
+    state = torch.get_rng_state().clone()
+    assert _moe._fp64_topk_works_on_musa() is (not broken)
+    assert torch.equal(torch.get_rng_state(), state)

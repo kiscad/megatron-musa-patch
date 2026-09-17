@@ -340,6 +340,7 @@ def _te_norm_unfused(original: Any) -> Any:
 PATCHES = (
     AttrPatch(
         id="megatron.te.layer-norm-linear.unfused",
+        version_gates=("transformer_engine >=2.0,<2.1",),
         target="megatron.core.extensions.transformer_engine:TELayerNormColumnParallelLinear",
         replace=_unfused_te_layer_norm_linear,
         rationale=(
@@ -428,6 +429,7 @@ PATCHES = (
     ),
     AttrPatch(
         id="megatron.transformer-block.layer-norm.impl-local",
+        version_gates=("transformer_engine >=2.0,<2.1",),
         target="megatron.core.transformer.transformer_block:LayerNormImpl",
         replace=_block_layer_norm_impl,
         rationale=(
@@ -450,6 +452,7 @@ PATCHES = (
     ),
     AttrPatch(
         id="megatron.te.norm.unfused-musa",
+        version_gates=("transformer_engine >=2.0,<2.1",),
         target="megatron.core.extensions.transformer_engine:TENorm",
         replace=_te_norm_unfused,
         rationale=(
