@@ -176,6 +176,23 @@ def _unfused_te_layer_norm_linear(original: Any) -> Any:
     import torch
     from megatron.core.extensions.transformer_engine import TEColumnParallelLinear
 
+    # te.pytorch.LayerNormLinear must still accept this class in runtime
+    # isinstance checks (TEFusedMLP rejects an FC1 that is not a TE
+    # LayerNormLinear). Inheriting it as a second base is not an option: the
+    # MRO would route te.pytorch.Linear's super() into LayerNormLinear's
+    # constructor. Megatron's own class derives from it; this replacement
+    # registers as a virtual subclass of the *current* binding instead (TE
+    # modules are ABCs), which stays true whether that binding is upstream or
+    # this package's native-unfused subclass. Resolved defensively: CPU stub
+    # tests build this class without a usable real TE import.
+    te_layernorm_linear = None
+    try:
+        import transformer_engine as _te
+
+        te_layernorm_linear = getattr(getattr(_te, "pytorch", None), "LayerNormLinear", None)
+    except Exception:  # noqa: BLE001 - stubbed or broken TE skips registration
+        te_layernorm_linear = None
+
     class _NormLinearDispatchMeta(type(TEColumnParallelLinear)):
         def __instancecheck__(cls, instance):
             # Megatron's FP8 parameter gathering identifies column-parallel
@@ -278,6 +295,9 @@ def _unfused_te_layer_norm_linear(original: Any) -> Any:
     # from subclasses without relying on the module attribute (which upstream
     # consumers may rebind).
     _BASE_NORM_LINEAR = TELayerNormColumnParallelLinear
+
+    if isinstance(te_layernorm_linear, type) and hasattr(te_layernorm_linear, "register"):
+        te_layernorm_linear.register(TELayerNormColumnParallelLinear)
 
     return TELayerNormColumnParallelLinear
 
