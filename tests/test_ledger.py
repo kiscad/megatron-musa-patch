@@ -43,6 +43,7 @@ _NON_MEGATRON_SCOPES = {
     # Megatron's wrapper patches cannot reach them.
     "transformer_engine.layer-norm-linear.native-unfused": "transformer_engine",
     "transformer_engine.layer-norm-mlp.native-unfused": "transformer_engine",
+    "transformer_engine.dot-product-attention.capability-dispatch": "transformer_engine",
 }
 
 

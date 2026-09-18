@@ -637,6 +637,121 @@ def _tedpa_forward(original: Any) -> Any:
     return forward
 
 
+def _te_native_dpa_forward(original: Any) -> Any:
+    """Subclass TE's own DotProductAttention with the capability dispatch.
+
+    ``te.pytorch.TransformerLayer`` (the direct-TE models of the megatron-FSDP
+    suite) runs its attention through TE's native class, not Megatron's
+    ``TEDotProductAttention`` wrapper -- Megatron-scope patches never reach it.
+    The MUSA port hard-codes the flash backend there, so inputs NVIDIA's
+    selector would route to the unfused backend (e.g. FP32 activations from
+    the suite's fp32 models) die on "FlashAttention only supports FP16 and
+    BF16 data types". The subclass keeps TE's constructor, hooks and state,
+    and only reroutes eligible flash-unsupported dense calls to TE's own
+    UnfusedDotProductAttention backend, exactly like the Megatron-wrapper
+    dispatch.
+    """
+    if (
+        _compat.module_source_contains(
+            "transformer_engine.musa.pytorch.attention", "use_flash_attention = True"
+        )
+        is False
+    ):
+        return None
+
+    class DotProductAttentionCapability(original):  # type: ignore[misc,valid-type]
+        _megatron_musa_patch_fallback = True
+
+        def forward(
+            self,
+            query_layer,
+            key_layer,
+            value_layer,
+            attention_mask=None,
+            qkv_format=None,
+            cu_seqlens_q=None,
+            cu_seqlens_kv=None,
+            cu_seqlens_q_padded=None,
+            cu_seqlens_kv_padded=None,
+            max_seqlen_q=None,
+            max_seqlen_kv=None,
+            attn_mask_type=None,
+            window_size=None,
+            checkpoint_core_attention=False,
+            core_attention_bias_type="no_bias",
+            core_attention_bias=None,
+            alibi_slopes=None,
+            **kwargs,
+        ):
+            import torch
+
+            layout = qkv_format or getattr(self, "qkv_format", "sbhd")
+            mask_name = _mask_type_name(
+                attn_mask_type
+                if attn_mask_type is not None
+                else getattr(self, "attn_mask_type", None)
+            )
+            tensors = (query_layer, key_layer, value_layer)
+            if (
+                not checkpoint_core_attention
+                and layout in ("sbhd", "bshd")
+                and cu_seqlens_q is None
+                and cu_seqlens_kv is None
+                and all(torch.is_tensor(t) and type(t) is torch.Tensor for t in tensors)
+                and _musa_live()
+                and query_layer.device.type == "musa"
+                and _flash_kernel_unsupported(self, query_layer, key_layer, value_layer)
+                and mask_name
+                in (
+                    "no_mask",
+                    "causal",
+                    "padding",
+                    "padding_causal",
+                    "causal_bottom_right",
+                    "padding_causal_bottom_right",
+                    "arbitrary",
+                )
+                and not (
+                    attention_mask is None and ("padding" in mask_name or mask_name == "arbitrary")
+                )
+            ):
+                out = _unfused_forward(
+                    self,
+                    query_layer,
+                    key_layer,
+                    value_layer,
+                    attention_mask,
+                    mask_name,
+                    core_attention_bias,
+                    layout,
+                )
+                if out is not None:
+                    return out
+            return original.forward(
+                self,
+                query_layer,
+                key_layer,
+                value_layer,
+                attention_mask=attention_mask,
+                qkv_format=qkv_format,
+                cu_seqlens_q=cu_seqlens_q,
+                cu_seqlens_kv=cu_seqlens_kv,
+                cu_seqlens_q_padded=cu_seqlens_q_padded,
+                cu_seqlens_kv_padded=cu_seqlens_kv_padded,
+                max_seqlen_q=max_seqlen_q,
+                max_seqlen_kv=max_seqlen_kv,
+                attn_mask_type=attn_mask_type,
+                window_size=window_size,
+                checkpoint_core_attention=checkpoint_core_attention,
+                core_attention_bias_type=core_attention_bias_type,
+                core_attention_bias=core_attention_bias,
+                alibi_slopes=alibi_slopes,
+                **kwargs,
+            )
+
+    return DotProductAttentionCapability
+
+
 PATCHES = (
     AttrPatch(
         id="megatron.te.attention.capability-dispatch",
@@ -707,6 +822,41 @@ PATCHES = (
             "re-run transformer/test_attention.py, "
             "test_multi_latent_attention.py and resharding/test_model_swap.py; "
             "delete only if the native path passes."
+        ),
+    ),
+    AttrPatch(
+        id="transformer_engine.dot-product-attention.capability-dispatch",
+        target="transformer_engine.pytorch.attention:DotProductAttention",
+        rebind_prefixes=("transformer_engine",),
+        replace=_te_native_dpa_forward,
+        rationale=(
+            "Direct TransformerEngine models (te.pytorch.TransformerLayer in "
+            "the megatron-FSDP suite, 56 mfsdp cases) run attention through "
+            "TE's own DotProductAttention, which the MUSA port pins to the "
+            "flash backend. FP32-activation models die on 'FlashAttention "
+            "only supports FP16 and BF16 data types, or Float8Tensors' where "
+            "NVIDIA's backend selector would pick the unfused backend; the "
+            "same flash backward window applies as on the Megatron wrapper. "
+            "Megatron-scope patches never reach this class."
+        ),
+        strategy=(
+            "Subclass TE's DotProductAttention -- constructor, musa hooks, "
+            "parameters and state stay TE's -- and reroute only eligible "
+            "dense (sbhd/bshd, no cu_seqlens, plain tensors, no checkpoint "
+            "core attention) calls whose inputs the flash kernel cannot serve "
+            "(measured forward window and backward window, dropout) to TE's "
+            "own UnfusedDotProductAttention backend, with the same padding-"
+            "mask normalization and mask-tensor dropping as the Megatron "
+            "wrapper dispatch. Everything else calls the original forward so "
+            "its own errors surface. Declines when the TE hard-coded flash "
+            "marker is gone (source probe)."
+        ),
+        upstream=("TransformerEngine pytorch/attention.py:DotProductAttention.forward"),
+        remove_when=(
+            "Remove together with megatron.te.attention.capability-dispatch "
+            "when the MUSA TransformerEngine selects backends by input "
+            "capability; re-run the megatron-FSDP te_transformer cases with "
+            "this patch disabled before deleting."
         ),
     ),
 )
