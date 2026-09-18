@@ -2,7 +2,7 @@
 
 本文维护设计与扩展契约。[README_zh.md](README_zh.md) 负责安装、开关与回退取舍；
 [AGENTS.md](AGENTS.md) 负责开发流程及完整验收命令。[English](CONTRIBUTING.md)。
-补丁元数据以 `patches/` 中的 ledger 和 `report()` 为准。
+补丁元数据以 `patches/` 中的 ledger 和 `report()` 为准；人类可读的补丁目录见 [docs/PATCHES_zh.md](docs/PATCHES_zh.md)。
 
 ## 1. 基本原则
 
