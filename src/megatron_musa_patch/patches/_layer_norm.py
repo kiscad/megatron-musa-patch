@@ -490,6 +490,39 @@ def _unfused_te_native_layernorm_mlp(original: Any) -> Any:
     return LayerNormMLPUnfused
 
 
+def _unfused_te_fused_mlp(original: Any) -> Any:
+    """Subclass Megatron's TEFusedMLP with the plain MLP decomposition.
+
+    TEFusedMLP runs its norm+fc1+activation+fc2 chain through TE's
+    operation-fuser (``BasicLayerNorm``/``BasicLinear`` ops), whose
+    normalization aborts in the same MUSA allocateSpace assertion as the
+    fused modules. The plain ``MLP.forward`` decomposition -- already used
+    everywhere else -- runs linear_fc1 (the unfused norm-linear replacement),
+    the functional activation and linear_fc2 on regular PyTorch ops.
+    """
+
+    if _env.flag("TE_FUSED_LAYERNORM", False) or not _musa_live():
+        return None
+    from megatron.core.transformer.mlp import MLP
+
+    class TEFusedMLPUnfused(original):  # type: ignore[misc,valid-type]
+        _megatron_musa_patch_fallback = True
+
+        def forward(self, hidden_states, **kwargs):
+            config = getattr(self, "config", None)
+            if config is not None and getattr(config, "fp8", False):
+                # FP8 needs TE's fused quantization; keep upstream so its own
+                # errors surface instead of silently changing precision.
+                return original.forward(self, hidden_states, **kwargs)
+            import torch
+
+            if not torch.is_tensor(hidden_states) or hidden_states.device.type != "musa":
+                return original.forward(self, hidden_states, **kwargs)
+            return MLP.forward(self, hidden_states, **kwargs)
+
+    return TEFusedMLPUnfused
+
+
 def _te_norm_unfused(original: Any) -> Any:
     """Build TENorm's norm with functional PyTorch ops on MUSA.
 
@@ -817,6 +850,37 @@ PATCHES = (
             "passes forward/backward, zero-centered gamma, meta materialization, "
             "checkpoint key/sharding and multi-rank sequence-parallel tests; "
             "re-run the 44 affected node ids with TE_NORM=1 before deleting."
+        ),
+    ),
+    AttrPatch(
+        id="megatron.te.fused-mlp.unfused",
+        version_gates=("transformer_engine >=2.0,<2.1",),
+        target="megatron.core.extensions.transformer_engine:TEFusedMLP",
+        replace=_unfused_te_fused_mlp,
+        rationale=(
+            "Megatron's TEFusedMLP (the use_te_fused_ops GPT spec, e.g. "
+            "models/test_gpt_model.py::TestGPTWithFusedOps) runs its "
+            "norm+MLP chain through TE's operation fuser, whose BasicLayerNorm "
+            "op aborts in the same MUSA allocateSpace assertion as the fused "
+            "norm modules; the module-level LayerNormLinear/LayerNormMLP "
+            "patches cannot reach an ops.Sequential chain."
+        ),
+        strategy=(
+            "Subclass TEFusedMLP and reroute non-FP8 MUSA forwards to the "
+            "plain MLP.forward decomposition: linear_fc1 (the unfused "
+            "norm-linear replacement handles normalization), the functional "
+            "activation, then linear_fc2. FP8 and non-MUSA inputs keep the "
+            "original fused forward so quantization semantics and its own "
+            "errors surface. TE_FUSED_LAYERNORM=1 restores upstream."
+        ),
+        upstream=(
+            "NVIDIA/Megatron-LM megatron/core/extensions/transformer_engine.py:"
+            "TEFusedMLP; megatron/core/transformer/mlp.py:MLP.forward"
+        ),
+        remove_when=(
+            "Remove after the MUSA TransformerEngine operation fuser's "
+            "BasicLayerNorm passes TestGPTWithFusedOps on MUSA with this "
+            "patch disabled."
         ),
     ),
 )
