@@ -1,8 +1,10 @@
 # megatron-musa-patch
 
-The goal is to run **unmodified Megatron-LM / Megatron-Core seamlessly on MUSA**: upstream unit tests and training scripts should run as supplied, and frameworks such as **ms-swift should call the same Megatron-Core interfaces without distinguishing MUSA from CUDA**.
+The primary goal is to run **unmodified Megatron-LM / Megatron-Core seamlessly on MUSA**: upstream unit tests and training scripts should run as supplied, and frameworks such as **ms-swift should call the same Megatron-Core interfaces without distinguishing MUSA from CUDA**.
 
-This repository owns the runtime adaptation. Installing it in a supported MUSA environment should be sufficient; callers should not need a MUSA fork, a special import, a replacement model class, or a device-specific branch. This is the acceptance target, not a claim that every upstream test and training configuration already passes.
+This contract covers the interfaces Megatron-Core already provides. It is deliberately **not** an absolute "upper frameworks must never change" rule: when a model architecture is too new for Megatron-LM to track, ms-swift or Megatron-Bridge may ship the support first — and then the MUSA adaptation for that feature belongs in the corresponding upper framework, which is the more reasonable boundary.
+
+This repository owns the runtime adaptation for **Megatron-Core's existing contract surface**. Installing it in a supported MUSA environment should be sufficient for that surface; callers should not need a MUSA fork, a special import, a replacement model class, or a device-specific branch. This is the acceptance target, not a claim that every upstream test and training configuration already passes. Adaptations for capabilities an upper framework implements ahead of Megatron-Core (new architectures, new kernels) belong to that framework and are out of scope here.
 
 ## Compatibility contract and current coverage
 
@@ -12,7 +14,7 @@ This repository owns the runtime adaptation. Installing it in a supported MUSA e
 | Megatron-LM training | Run original Python and shell training scripts without source edits or required MUSA launchers. Preserve model, optimizer, distributed and checkpoint semantics. |
 | Megatron-Core callers, including ms-swift | Preserve import paths, public signatures, configuration objects, outputs and state-dict contracts. Core compatibility must work with a `megatron-core` wheel, without depending on `megatron.training` being present. |
 
-Installing MUSA dependencies and supplying existing launcher inputs (data paths, output directories, device count and a resource-appropriate model size) are environment setup. Requiring callers to replace `cuda` with `musa`, `nccl` with `mccl`, add `import megatron_musa_patch`, or disable a requested feature is a compatibility gap. Such workarounds may help diagnosis, but do not satisfy the unchanged-caller target.
+Installing MUSA dependencies and supplying existing launcher inputs (data paths, output directories, device count and a resource-appropriate model size) are environment setup. Within the contract surface above, requiring callers to replace `cuda` with `musa`, `nccl` with `mccl`, add `import megatron_musa_patch`, or disable a requested feature is a compatibility gap. Such workarounds may help diagnosis, but do not satisfy the unchanged-caller target. Upper-framework code that wires Megatron to a brand-new model architecture is a different matter: its device adaptation lives in that framework by design.
 
 The current implementation prioritizes correctness and uses conservative fallbacks where needed: PyTorch normalization, synchronous DP reduction and in-process checkpoint bucket writes. It also has targeted TE/FP8 and fused-RoPE checks. These checks and the examples cover specific paths; they do not establish full upstream-suite coverage, unchanged-script coverage, or end-to-end ms-swift compatibility. Record remaining failures, skips and required overrides explicitly. Performance work follows correctness and must retain the same caller contract; fallback trade-offs and removal conditions remain reviewable in the patch ledger.
 
@@ -23,7 +25,18 @@ For development, read [CONTRIBUTING.md](CONTRIBUTING.md). Coding agents should s
 ```bash
 git clone https://github.com/kiscad/megatron-musa-patch
 cd megatron-musa-patch && git checkout v0.16.1-dev
-pip install .
+
+# The MUSA container already provides torch/torch_musa pinned to each other.
+# A plain `pip install .` resolves the torchada dependency and would pull the
+# latest upstream torch (e.g. 2.11), replacing the vendor-pinned build and
+# breaking the MUSA stack. Install without dependency resolution:
+pip install --no-deps torchada==0.1.86
+pip install --no-deps .
+
+# Alternative if you want the resolver to run: constrain the vendor stack so
+# pip cannot upgrade it (adjust the pin to your container's torch build):
+#   printf 'torch==2.7.1\n' > constraints-musa.txt
+#   pip install -c constraints-musa.txt .
 
 cd /path/to/Megatron-LM
 torchrun --nproc_per_node=8 pretrain_gpt.py \

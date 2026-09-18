@@ -389,7 +389,8 @@ Manual run: `bash scripts/ci/pre-push.sh`; tool settings live in
 ## 7. Testing
 
 ```bash
-python -m pip install -e ".[dev]"
+python -m pip install --no-deps -e ".[dev]"
+python -m pip install pytest pytest-cov   # dev extra 不会被 --no-deps 安装
 python -m pytest -q    # works on CPU; hardware-dependent cases may skip
 MEGATRON_MUSA_RUN_INTEGRATION=1 MEGATRON_LM_PATH=/path/to/Megatron-LM \
     python -m pytest tests/test_megatron_integration.py -q    # real-stack checks (subprocess)

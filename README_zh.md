@@ -1,8 +1,10 @@
 # megatron-musa-patch（中文速览）
 
-项目目标是让 **Megatron-LM / Megatron-Core 在 MUSA 平台上无缝运行**：上游仓库的单元测试和训练脚本无需修改即可直接运行，**ms-swift 等上层框架调用 Megatron-Core 接口时无需区分 MUSA / CUDA**。
+项目首要目标是让 **Megatron-LM / Megatron-Core 在 MUSA 平台上无缝运行**：上游仓库的单元测试和训练脚本无需修改即可直接运行，**ms-swift 等上层框架调用 Megatron-Core 接口时无需区分 MUSA / CUDA**。
 
-运行时适配由本仓库承担。在受支持的 MUSA 环境安装本包后，调用方应继续使用原有代码，无需 MUSA 分支、额外 import、替代模型类或设备判断。这是项目的验收目标，不代表当前所有上游测试与训练配置都已通过。
+该契约覆盖的是 Megatron-Core **已有**的接口面，并不是「上层框架永远不许修改」的绝对规则：当模型架构过新、Megatron-LM 版本跟进较慢时，ms-swift 或 Megatron-Bridge 可能率先实现了对应支持——此时该特性的 MUSA 适配放在对应上层框架内才更合理。
+
+本仓库承担 **Megatron-Core 既有契约面**的运行时适配。在该面上，受支持的 MUSA 环境安装本包后，调用方应继续使用原有代码，无需 MUSA 分支、额外 import、替代模型类或设备判断。这是项目的验收目标，不代表当前所有上游测试与训练配置都已通过。上层框架先行于 Megatron-Core 实现的能力（新架构、新 kernel），其设备适配归该框架所有，不在本仓库范围内。
 
 ## 兼容性契约与当前覆盖
 
@@ -12,7 +14,7 @@
 | Megatron-LM 训练 | 原始 Python 和 shell 训练脚本无需源码修改，也不依赖专用 MUSA 启动器；保持模型、优化器、分布式和 checkpoint 语义。 |
 | ms-swift 等 Megatron-Core 调用方 | 保持 import 路径、公开签名、配置对象、输出和 state dict 契约。只安装 `megatron-core` wheel 时也必须具备 core 兼容能力，不能依赖 `megatron.training`。 |
 
-安装 MUSA 依赖、通过启动器已有入口设置数据路径、输出目录、卡数和适合资源的模型规模，属于环境配置。要求调用方把 `cuda` 改成 `musa`、把 `nccl` 改成 `mccl`、添加 `import megatron_musa_patch` 或关闭原本要求的功能，属于兼容缺口；这些做法可用于定位问题，但不满足调用方无需修改的目标。
+在上述契约面内，要求调用方把 `cuda` 改成 `musa`、把 `nccl` 改成 `mccl`、添加 `import megatron_musa_patch` 或关闭原本要求的功能，属于兼容缺口；这些做法可用于定位问题，但不满足调用方无需修改的目标。上层框架为接入全新模型架构所做的接线代码则是另一回事：其设备适配按设计落在该框架内。
 
 当前实现优先保证正确性，在必要处使用 PyTorch 归一化、同步 DP 规约、进程内 checkpoint bucket 写入等保守回退，并提供 TE/FP8、融合 RoPE 等专项检查。这些检查与示例只覆盖具体路径，不能据此宣称上游全量测试、原始训练脚本或 ms-swift 端到端已经全部兼容。尚存失败、跳过项及必需的参数覆盖都要明确记录。性能优化应在正确性验证后推进，并保持同一调用契约；回退代价及移除条件必须在 patch ledger 中可追溯。
 
@@ -23,7 +25,16 @@
 ```bash
 git clone https://github.com/kiscad/megatron-musa-patch
 cd megatron-musa-patch && git checkout v0.16.1-dev
-pip install .
+
+# MUSA 容器内的 torch / torch_musa 是互相绑定的厂商构建。直接
+# `pip install .` 会解析 torchada 依赖并拉取最新上游 torch（如 2.11），
+# 覆盖厂商锁定版本、破坏 MUSA 栈。请关闭依赖解析安装：
+pip install --no-deps torchada==0.1.86
+pip install --no-deps .
+
+# 若希望保留依赖解析：用 constraints 锁定厂商栈（按容器内 torch 版本调整）：
+#   printf 'torch==2.7.1\n' > constraints-musa.txt
+#   pip install -c constraints-musa.txt .
 
 cd /path/to/Megatron-LM
 torchrun --nproc_per_node=8 pretrain_gpt.py \
