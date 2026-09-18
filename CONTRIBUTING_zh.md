@@ -52,6 +52,7 @@ src/megatron_musa_patch/
 │   └── torch_cuda.py      torchada + 4 个 Megatron 专用 torch 覆盖
 └── patches/
     ├── __init__.py        ledger：聚合下面各模块的 PATCHES
+    ├── _python_compat.py  为新版 Megatron 补齐标准库名字的 hook
     ├── _torch_backend.py  安装 torch.cuda 兼容层的 hook
     ├── _device_arch.py    NVIDIA 尺度的设备 capability / 架构版本
     ├── _distributed.py    MCCL 进程组干净退出
@@ -68,6 +69,7 @@ tests/
 ├── test_engine_lifecycle.py     同目标链式 patch、所有权、失败原子性
 ├── test_activation.py           激活通道与 entry point 延迟安装（子进程）
 ├── test_ledger.py               ledger 契约与作用域守卫
+├── test_python_compat.py        解释器 backport：所有权与撤销
 ├── test_device_arch.py          合成 capability hook
 ├── test_layer_norm.py           norm 回退类的契约
 ├── test_te_layer_norm.py        TE norm-linear 回退契约（CPU + 可选 MUSA）

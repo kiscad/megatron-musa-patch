@@ -64,6 +64,7 @@ src/megatron_musa_patch/
 │   └── torch_cuda.py      torchada + the 4 Megatron-specific torch overrides
 └── patches/
     ├── __init__.py        The ledger: aggregates PATCHES from the modules below
+    ├── _python_compat.py  Hook that backports stdlib names newer Megatron imports
     ├── _torch_backend.py  Hook that installs the torch.cuda layer
     ├── _device_arch.py    NVIDIA-scale device capability / arch version
     ├── _distributed.py    Clean MCCL process-group teardown
@@ -80,6 +81,7 @@ tests/
 ├── test_engine_lifecycle.py     Chained patches, ownership, failure atomicity
 ├── test_activation.py           Activation channels and entry-point deferral (subprocess)
 ├── test_ledger.py               Ledger contract + scope guard rails
+├── test_python_compat.py        Interpreter backport: ownership and undo
 ├── test_device_arch.py          Synthetic capability hook
 ├── test_layer_norm.py           Norm fallback class contract
 ├── test_te_layer_norm.py        TE norm-linear fallback contract (CPU + opt-in MUSA)

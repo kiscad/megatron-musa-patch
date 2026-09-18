@@ -24,6 +24,7 @@ from . import (
     _grouped_gemm,
     _layer_norm,
     _moe,
+    _python_compat,
     _rope,
     _softmax,
     _torch_backend,
@@ -33,10 +34,12 @@ from . import (
 
 __all__ = ["PATCHES", "MODULES"]
 
-#: Order matters for patches that touch the same symbol.  The device
-#: compatibility layer goes first so that anything reading ``torch.cuda`` while
-#: its own replacement is being built already sees a working namespace.
+#: Order matters for patches that touch the same symbol.  Interpreter
+#: backports come first: they only add missing standard-library names.  The
+#: device compatibility layer follows so that anything reading ``torch.cuda``
+#: while its own replacement is being built already sees a working namespace.
 MODULES = (
+    _python_compat,
     _torch_backend,
     _device_arch,
     _distributed,
