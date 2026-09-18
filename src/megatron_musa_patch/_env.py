@@ -37,6 +37,10 @@ Variable                           Meaning                               Default
                                    fallback, keeping upstream's
                                    "apply_rope_fusion is not available"
                                    verdict.
+``..._GDN_TILELANG``               ``0`` declines the torch-kernels       ``1``
+                                   TileLang dispatch of Megatron's (and
+                                   mcore-bridge's) chunked gated delta
+                                   rule, keeping flash-linear-attention.
 ``..._JIT_WARMUP``                 ``1`` keeps upstream's JIT warm-up.   ``0``
 ``..._CKPT_FORK``                  ``1`` keeps upstream's forked         ``0``
                                    checkpoint writer.

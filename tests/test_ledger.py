@@ -30,12 +30,24 @@ def test_every_patch_has_an_actionable_maintenance_record(patch):
         assert AppliedPatch(patch).as_dict()[field] == value
 
 
+#: AttrPatch scopes above Megatron, each a reviewed exception that names its
+#: target explicitly. ``megatron.`` remains the default for everything else.
+_NON_MEGATRON_SCOPES = {
+    # mcore-bridge's GDN forward re-imports fla's chunk_gated_delta_rule into
+    # its own namespace, so the MUSA kernel choice is unreachable through
+    # Megatron's binding alone on the path ms-swift's
+    # ``--bridge_backend mcore-bridge`` executes.
+    "mcore_bridge.ssm.gated-delta-rule.tilelang": "mcore_bridge",
+}
+
+
 def test_targets_and_hooks_have_explicit_scope():
     for patch in PATCHES:
         if isinstance(patch, AttrPatch):
-            assert patch.module_name.startswith("megatron.")
+            scope = _NON_MEGATRON_SCOPES.get(patch.id, "megatron")
+            assert patch.module_name.startswith(scope + ".")
             assert ":" in patch.target
-            assert patch.rebind_prefixes == ("megatron",)
+            assert patch.rebind_prefixes == (scope,)
         else:
             # transformer_engine is the one sanctioned exception: MT-TE's
             # import-time factory shim breaks eager torch.jit.script before
