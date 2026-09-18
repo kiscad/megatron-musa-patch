@@ -38,6 +38,11 @@ _NON_MEGATRON_SCOPES = {
     # Megatron's binding alone on the path ms-swift's
     # ``--bridge_backend mcore-bridge`` executes.
     "mcore_bridge.ssm.gated-delta-rule.tilelang": "mcore_bridge",
+    # Direct TransformerEngine models (te.pytorch.TransformerLayer in the
+    # megatron-FSDP suite) construct these modules inside TE's own namespace;
+    # Megatron's wrapper patches cannot reach them.
+    "transformer_engine.layer-norm-linear.native-unfused": "transformer_engine",
+    "transformer_engine.layer-norm-mlp.native-unfused": "transformer_engine",
 }
 
 
