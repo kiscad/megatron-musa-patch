@@ -46,7 +46,7 @@ Issues = "https://github.com/kiscad/megatron-musa-patch/issues"
 #   TORCH_DEVICE_BACKEND_AUTOLOAD=0   (torch's own kill switch)
 #   MEGATRON_MUSA_PATCH_AUTOLOAD=0    (ours, keeps `import megatron_musa_patch` working)
 [project.entry-points."torch.backends"]
-megatron_musa_patch = "megatron_musa_patch:_torch_backend_autoload"
+megatron_musa_patch = "megatron_musa_patch:torch_backend_autoload"
 
 [tool.setuptools]
 package-dir = { "" = "src" }
@@ -60,3 +60,54 @@ addopts = "-ra"
 markers = [
     "integration: needs MEGATRON_MUSA_RUN_INTEGRATION=1 and a working MUSA stack",
 ]
+
+# ---------------------------------------------------------------------------
+# 开发工具链：pre-commit 钩子与本地命令共用同一份配置
+# (Dev toolchain shared by pre-commit hooks and local commands.)
+# ---------------------------------------------------------------------------
+
+[tool.black]
+line-length = 100
+target-version = ["py39", "py310"]
+
+[tool.isort]
+profile = "black"
+line_length = 100
+
+[tool.ruff]
+line-length = 100
+target-version = "py39"
+extend-exclude = ["build", "dist"]
+
+[tool.ruff.lint]
+# 与 isort 分工：导入排序交给 isort（ruff 不启用 I 规则）。
+select = ["E4", "E7", "E9", "F", "W", "B", "UP"]
+ignore = [
+    "E501",  # 行长由 black 处理；ledger 长字符串不拆分
+    "UP007", # PEP 604 Union：requires-python>=3.9，保持 Optional 一致写法
+    "UP045", # 同上（Optional）
+    "UP035", # typing.Dict/List 等旧拼写仍在 requires-python>=3.9 支持范围
+]
+
+[tool.ruff.lint.per-file-ignores]
+# 测试里的 lambda 桩（monkeypatch 替身）是惯用法，不强制 def。
+"tests/*" = ["E731"]
+# 硬件 smoke 先改 sys.path 再导入厂商包，E402 是有意的。
+"tests/*_smoke.py" = ["E402"]
+
+[tool.mypy]
+python_version = "3.10"
+files = ["src"]
+ignore_missing_imports = true
+check_untyped_defs = true
+warn_unused_ignores = false
+exclude = ["build", "dist"]
+
+[[tool.mypy.overrides]]
+# 这两个模块的全部工作就是对外部模块做 setattr（monkeypatch 本职），
+# 动态属性错误在此豁免；其余类别仍检查。
+# (These modules exist to setattr on foreign modules; the dynamic-attribute
+# categories are disabled here, everything else is still checked.)
+module = ["megatron_musa_patch.patches._layer_norm",
+          "megatron_musa_patch.patches._transformer_engine"]
+disable_error_code = ["attr-defined", "union-attr", "misc"]

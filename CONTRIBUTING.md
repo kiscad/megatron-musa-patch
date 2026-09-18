@@ -357,6 +357,35 @@ package and must not depend on downstream registration.
 
 ---
 
+## 6.5 Local gates (pre-commit / pre-push)
+
+All Git operations happen inside the development container. The check logic
+lives in `scripts/ci/`, and local hooks plus the GitHub quality gate reuse
+the same scripts:
+
+| Stage | Trigger | Script | Contents |
+|---|---|---|---|
+| commit | `git commit` | `scripts/ci/quick-check.sh` | ruff / black / isort fast static checks (seconds) |
+| push | `git push` | `scripts/ci/lint.sh` + `unit-tests.sh` | full lint + mypy + unit tests (~30 s) |
+| PR/main | GitHub Actions | `scripts/ci/pre-push.sh` | final guard running the same scripts (lightweight CPU container; MUSA hardware cases skip) |
+
+One-time bootstrap (installs `.git/hooks/pre-commit` and `pre-push`):
+
+```bash
+bash scripts/setup-dev-hooks.sh
+```
+
+Regular `git commit` / `git push` then runs the corresponding checks
+automatically; failures block the commit/push. Do not put hardware smokes,
+distributed or real-training tasks into pre-push by default -- heavy
+verification belongs to dedicated hardware rounds (see "7. Testing"),
+otherwise developers grow into the `--no-verify` habit.
+
+Manual run: `bash scripts/ci/pre-push.sh`; tool settings live in
+`pyproject.toml` (`[tool.ruff]`/`[tool.isort]`/`[tool.black]`/`[tool.mypy]`).
+
+---
+
 ## 7. Testing
 
 ```bash

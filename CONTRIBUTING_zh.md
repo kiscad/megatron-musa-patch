@@ -315,6 +315,32 @@ ENGINE.apply_now()
 
 ---
 
+## 6.5 本地开发门禁（pre-commit / pre-push）
+
+所有 Git 操作都在开发容器内执行，检查逻辑统一放在 `scripts/ci/`，
+本地 hook 与 GitHub 质量门禁复用同一套脚本：
+
+| 阶段 | 触发 | 脚本 | 内容 |
+|---|---|---|---|
+| commit | `git commit` | `scripts/ci/quick-check.sh` | ruff / black / isort 快速静态检查（秒级） |
+| push | `git push` | `scripts/ci/lint.sh` + `unit-tests.sh` | 完整 lint + mypy + 单元测试（约 30 s） |
+| PR/主分支 | GitHub Actions | `scripts/ci/pre-push.sh` | 同一套脚本的最终守护（轻量 CPU 容器，MUSA 硬件用例按 skip 跳过） |
+
+首次初始化（安装 `.git/hooks/pre-commit` 与 `pre-push`）：
+
+```bash
+bash scripts/setup-dev-hooks.sh
+```
+
+之后正常 `git commit` / `git push` 即自动执行对应检查；失败会阻止提交/推送。
+不要在 pre-push 里默认跑硬件 smoke、分布式或真实训练任务——重型验证属于
+专用硬件轮次（见「7. 测试」），否则开发者会养成 `--no-verify` 的习惯。
+
+手动执行：`bash scripts/ci/pre-push.sh`；工具配置集中在 `pyproject.toml`
+（`[tool.ruff]`/`[tool.isort]`/`[tool.black]`/`[tool.mypy]`）。
+
+---
+
 ## 7. 测试
 
 ```bash
