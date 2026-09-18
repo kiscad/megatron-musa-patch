@@ -25,7 +25,8 @@ def test_te_version_predicate_is_not_overridden(engine, stub_module):
     assert all(r["id"] != "megatron.core.utils.te-version-check.ignore" for r in engine.report())
 
 
-def test_mem_monitor_shim_installs_and_undos():
+def test_mem_monitor_shim_installs_and_undos(monkeypatch):
+    monkeypatch.setattr(_transformer_engine, "_te_fork_needs_mem_monitor", lambda: True)
     import sys
 
     for name in ("musa_patch", "musa_patch.mem_utils"):
@@ -63,7 +64,8 @@ def test_mem_monitor_shim_requires_the_musa_fork(monkeypatch):
     assert "musa_patch" not in sys.modules
 
 
-def test_mem_monitor_shim_installs_through_engine(engine):
+def test_mem_monitor_shim_installs_through_engine(engine, monkeypatch):
+    monkeypatch.setattr(_transformer_engine, "_te_fork_needs_mem_monitor", lambda: True)
     import sys
 
     sys.modules.pop("musa_patch", None)
@@ -530,3 +532,18 @@ def test_safe_seed_seeds_when_unsafe_loop_present(monkeypatch):
         _transformer_engine._uninstall_safe_te_utils_module()
         if saved is not None:
             sys.modules[name] = saved
+
+
+def test_mem_monitor_shim_respects_unimported_package(monkeypatch, fake_package):
+    import sys
+
+    fake_package("musa_patch", "raise RuntimeError('probe must not execute package')\n")
+    monkeypatch.delitem(sys.modules, "musa_patch", raising=False)
+    monkeypatch.delitem(sys.modules, "musa_patch.mem_utils", raising=False)
+    monkeypatch.setattr(_transformer_engine, "_te_fork_needs_mem_monitor", lambda: True)
+    try:
+        assert _transformer_engine._install_mem_monitor_shim() is False
+        assert "musa_patch" not in sys.modules
+        assert not _transformer_engine._mem_monitor_owned
+    finally:
+        _transformer_engine._uninstall_mem_monitor_shim()

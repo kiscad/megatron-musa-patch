@@ -15,18 +15,11 @@ from typing import Any
 
 from .. import _compat
 from .._engine import AttrPatch
+from ..backends import musa_available as _musa_live
 
 __all__ = ["PATCHES"]
 
 logger = logging.getLogger("megatron_musa_patch")
-
-
-def _musa_live() -> bool:
-    import torch
-
-    musa = getattr(torch, "musa", None)
-    available = getattr(musa, "is_available", None)
-    return callable(available) and bool(available())
 
 
 def _fp64_topk(torch, input, k, dim, largest, sorted):
@@ -41,7 +34,7 @@ def _fp64_topk(torch, input, k, dim, largest, sorted):
         dim = -1  # torch.topk's documented default
     _, cpu_indices = torch.topk(input.detach().cpu(), k=k, dim=dim, largest=largest, sorted=sorted)
     indices = cpu_indices.to(input.device)
-    return input.gather(dim, indices), indices
+    return torch.return_types.topk((input.gather(dim, indices), indices))
 
 
 class _MoeTorchProxy:
@@ -54,6 +47,8 @@ class _MoeTorchProxy:
         return getattr(self._torch, name)
 
     def topk(self, input, k, dim=None, largest=True, sorted=True, *, out=None):
+        if out is not None:
+            return self._torch.topk(input, k, dim=dim, largest=largest, sorted=sorted, out=out)
         if input.dtype == self._torch.float64 and input.device.type == "musa" and _musa_live():
             logger.debug(
                 "MoE topk FP64 reference path: shape=%s k=%s dim=%s",
@@ -62,8 +57,6 @@ class _MoeTorchProxy:
                 dim,
             )
             return _fp64_topk(self._torch, input, k, dim, largest, sorted)
-        if out is not None:
-            return self._torch.topk(input, k, dim=dim, largest=largest, sorted=sorted, out=out)
         return self._torch.topk(input, k, dim=dim, largest=largest, sorted=sorted)
 
 
@@ -100,24 +93,18 @@ def _moe_torch_namespace(original: Any) -> Any:
     return _MoeTorchProxy(original)
 
 
-#: dtypes the MT-TE moe permutation kernel accepts. The kernel's own error text
-#: says "Invalid type for 16 bit", but the measured constraint is the opposite:
-#: float32 and float64 fail while float16/bfloat16 pass (muDNN
-#: ``permutation_mask.mu`` rejects the 32/64-bit key). FP8 subclasses are
-#: untested and deliberately left on the fused path.
-_FUSED_PERMUTE_BROKEN_DTYPES: tuple[Any, ...] | None = None
-
-
+# Dtypes the MT-TE moe permutation kernel accepts. The kernel's own error text
+# says "Invalid type for 16 bit", but the measured constraint is the opposite:
+# float32 and float64 fail while float16/bfloat16 pass (muDNN
+# ``permutation_mask.mu`` rejects the 32/64-bit key). FP8 subclasses are
+# untested and deliberately left on the fused path.
 def _fused_permute_unsupported(tensor) -> bool:
     """True when the fused permute kernel cannot serve this tensor's dtype."""
-    global _FUSED_PERMUTE_BROKEN_DTYPES
-    if _FUSED_PERMUTE_BROKEN_DTYPES is None:
-        import torch
+    import torch
 
-        _FUSED_PERMUTE_BROKEN_DTYPES = (torch.float32, torch.float64)
     if not _musa_live() or tensor.device.type != "musa":
         return False
-    return tensor.dtype in _FUSED_PERMUTE_BROKEN_DTYPES
+    return tensor.dtype in (torch.float32, torch.float64)
 
 
 def _moe_permute_unfused(original: Any) -> Any:
@@ -238,7 +225,7 @@ PATCHES = (
             "probs/num_out_tokens/drop_and_pad and the (permuted tokens, "
             "permuted probs, sorted indices) contract are unchanged, gradients "
             "flow through upstream's scatter path, and float16/bfloat16/FP8 "
-            "inputs keep the fused kernel. Requires the paired unpermute patch "
+            "inputs keep the fused kernel. Use together with the unpermute patch "
             "so both ends use the same index format."
         ),
         upstream="NVIDIA/Megatron-LM megatron/core/transformer/moe/moe_utils.py:permute",
@@ -265,8 +252,9 @@ PATCHES = (
             "Demote the fused branch to upstream's reference implementation under "
             "the same dtype condition as the permute patch, keeping probs, "
             "routing_map, restore_shape and drop_and_pad semantics. Declared as "
-            "requiring the permute companion so ONLY/DISABLE can never activate "
-            "one end alone."
+            "requiring the permute companion so ONLY/DISABLE cannot activate "
+            "unpermute without permute; selecting permute alone is not a complete "
+            "dispatch/restore compatibility path."
         ),
         upstream="NVIDIA/Megatron-LM megatron/core/transformer/moe/moe_utils.py:unpermute",
         remove_when=(

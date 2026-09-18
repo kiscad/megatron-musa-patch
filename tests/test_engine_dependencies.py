@@ -55,3 +55,15 @@ def test_dependency_cycle_is_rejected_atomically(engine):
             ]
         )
     assert engine.report() == []
+
+
+def test_missing_companion_skips_target_resolution(engine, stub_module):
+    module = stub_module("companions")
+    engine.register(
+        [AttrPatch("consumer", "companions:removed", lambda old: True, requires=("provider",))]
+    )
+    engine.install()
+    assert not hasattr(module, "removed")
+    record = engine.report()[0]
+    assert record["status"] == "skipped"
+    assert "provider" in record["detail"]

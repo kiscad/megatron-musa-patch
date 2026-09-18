@@ -61,7 +61,7 @@ smoke 成功，均不能单独证明上述三类验收完成。不要把未测�
 | `_engine.py` | import watcher、属性链、别名、所有权、回滚、report；仅修改通用机制。 |
 | `_compat.py`、`_errors.py` | 版本与目标解析、异常上下文；版本范围同时检查声明和判断函数，version_gates 只比较数字 release。 |
 | `_env.py` | 环境开关集中说明与惰性读取；不要把环境变量值缓存到模块常量。 |
-| `backends/torch_cuda.py` | torchada 之上的设备契约补偿，不实现第二套通用适配层。 |
+| `backends/__init__.py`、`backends/torch_cuda.py` | 共享惰性设备探测；torchada 之上的设备契约补偿，不实现第二套通用适配层。 |
 | `patches/_*.py`、`patches/__init__.py` | 具体补丁与 `MODULES` 注册；同目标的先后顺序有意义。 |
 | `tests/test_*.py` | 引擎、补丁契约与集成回归；硬件 worker 为 `*_smoke.py`。 |
 | `examples/` | 复现、诊断和演示入口；不承担原始调用方必需的适配逻辑。 |
@@ -207,7 +207,7 @@ pytest 的自动激活已通过。部分设备契约在检测到 MUSA 时直接�
 
 ### 6.3 训练、保存与恢复
 
-先用本包小规模脚本定位基础链路（脚本会删除并重建指定 `OUTPUT_DIR`，只给它专用目录）：
+先用本包小规模脚本定位基础链路（默认创建唯一临时目录；显式 `OUTPUT_DIR` 必须不存在或为空，已有输出不会删除）：
 
 ```bash
 cd "$MMP_ROOT"

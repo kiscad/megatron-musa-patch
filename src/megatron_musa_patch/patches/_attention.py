@@ -15,6 +15,7 @@ from typing import Any
 
 from .. import _compat
 from .._engine import AttrPatch
+from ..backends import musa_available as _musa_live
 
 __all__ = ["PATCHES"]
 _TEDPA = "megatron.core.extensions.transformer_engine:TEDotProductAttention.forward"
@@ -23,14 +24,6 @@ _TEDPA = "megatron.core.extensions.transformer_engine:TEDotProductAttention.forw
 #: flash_musa; MT-TE gates on the same values in flash_attn_varlen_func_variance).
 _MIN_FLASH_DIM = 64
 _MAX_FLASH_DIM = 192
-
-
-def _musa_live() -> bool:
-    import torch
-
-    musa = getattr(torch, "musa", None)
-    available = getattr(musa, "is_available", None)
-    return callable(available) and bool(available())
 
 
 def _effective_dropout(self) -> float:

@@ -4,7 +4,7 @@ Quick start
 -----------
 Install the package and do nothing else::
 
-    pip install megatron-musa-patch
+    pip install --no-deps megatron-musa-patch  # runtime dependencies preinstalled
     torchrun --nproc_per_node=8 pretrain_gpt.py ...
 
 The ``torch.backends`` entry point in ``pyproject.toml`` makes PyTorch call

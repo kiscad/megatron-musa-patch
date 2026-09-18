@@ -14,6 +14,7 @@ from typing import Any, Callable
 
 from .. import _env
 from .._engine import AttrPatch, HookPatch
+from ..backends import musa_available as _musa_live
 
 __all__ = ["PATCHES"]
 
@@ -85,14 +86,6 @@ def _fsdp_gradient_reduce_prescale(original: Any) -> Any:
         return original(grad_data, scaling_factor, ddp_config)
 
     return gradient_reduce_preprocessing
-
-
-def _musa_live() -> bool:
-    import torch
-
-    musa = getattr(torch, "musa", None)
-    available = getattr(musa, "is_available", None)
-    return callable(available) and bool(available())
 
 
 class _SubgroupsDistributedProxy:

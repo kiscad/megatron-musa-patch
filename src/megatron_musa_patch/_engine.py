@@ -471,19 +471,35 @@ class Engine:
                 return detail
         return None
 
+    def _declared_targets(self) -> set[tuple[str, str]]:
+        return {
+            (patch.module_name, patch.attr_name)
+            for record in self._records.values()
+            if isinstance(patch := record.patch, AttrPatch)
+        }
+
+    def _skip_reason(self, patch: AttrPatch) -> str | None:
+        gate = self._version_gate_block(patch)
+        if gate is not None:
+            return f"version gate: {gate}"
+        unavailable = [pid for pid in patch.requires if not self.is_applied(pid)]
+        if unavailable:
+            return "requires applied companion(s): " + ", ".join(unavailable)
+        return None
+
     def _apply_target(self, module, attr: str, patches: list[AttrPatch], trigger: str) -> None:
         key = (module.__name__, attr)
         previous = self._bindings.get(key)
         active = patches[0]
         mutations = []
         try:
-            gates = {p.id: self._version_gate_block(p) for p in patches}
-            # A version excluded by every patch may have removed the symbol.
-            # No binding to restore means there is nothing to resolve or mutate.
-            if previous is None and all(detail is not None for detail in gates.values()):
+            reasons = {p.id: self._skip_reason(p) for p in patches}
+            # Ineligible consumers need not expose their target symbol. Resolve
+            # only when a factory can run or an existing binding needs cleanup.
+            if previous is None and all(detail is not None for detail in reasons.values()):
                 for patch in patches:
                     record = self._records[patch.id]
-                    record.status, record.detail = "skipped", f"version gate: {gates[patch.id]}"
+                    record.status, record.detail = "skipped", reasons[patch.id] or ""
                     self._log(record)
                 return
             owner_path, _, leaf = attr.rpartition(".")
@@ -511,19 +527,9 @@ class Engine:
             baseline = current
             outcomes = []
             for active in patches:
-                gate_detail = gates[active.id]
-                if gate_detail is not None:
-                    outcomes.append((active, "skipped", f"version gate: {gate_detail}"))
-                    continue
-                unavailable = [pid for pid in active.requires if not self.is_applied(pid)]
-                if unavailable:
-                    outcomes.append(
-                        (
-                            active,
-                            "skipped",
-                            "requires applied companion(s): " + ", ".join(unavailable),
-                        )
-                    )
+                reason = reasons[active.id]
+                if reason is not None:
+                    outcomes.append((active, "skipped", reason))
                     continue
                 # Preserve binding semantics for staticmethod/classmethod.
                 value = (
@@ -562,14 +568,15 @@ class Engine:
                     # Rebinding it as a consumer would invalidate its ownership
                     # (e.g. initialize/training both patch the same JIT helper).
                     binding.rebind_prefixes = prefixes
-                    declared = set()
-                    for record in self._records.values():
-                        gate_patch = record.patch
-                        if isinstance(gate_patch, AttrPatch):
-                            declared.add((gate_patch.module_name, gate_patch.attr_name))
-                    binding.aliases.extend(
-                        _rebind_aliases(module, leaf, raw, current, prefixes, declared)
-                    )
+                    declared = self._declared_targets()
+                    sources = [raw]
+                    if previous is not None and previous.replacement is not raw:
+                        sources.append(previous.replacement)
+                    for source in sources:
+                        aliases = _rebind_aliases(module, leaf, source, current, prefixes, declared)
+                        for consumer, name, old in aliases:
+                            mutations.append((consumer, name, old, True, current))
+                            binding.aliases.append((consumer, name, baseline))
                 self._bindings[key] = binding
                 if key not in self._undo_order:
                     self._undo_order.append(key)
@@ -581,11 +588,7 @@ class Engine:
                     if vars(consumer).get(name) is previous.replacement:
                         mutations.append((consumer, name, previous.replacement, True, baseline))
                         setattr(consumer, name, baseline)
-                declared = {
-                    (p.module_name, p.attr_name)
-                    for r in self._records.values()
-                    if isinstance(p := r.patch, AttrPatch)
-                }
+                declared = self._declared_targets()
                 _rebind_aliases(
                     owner, leaf, previous.replacement, baseline, previous.rebind_prefixes, declared
                 )
@@ -629,11 +632,7 @@ class Engine:
         self._hooks.clear()
         errors = []
         retained: list[Union[tuple[str, str], HookPatch]] = []
-        targets = {
-            (p.module_name, p.attr_name)
-            for r in self._records.values()
-            if isinstance(p := r.patch, AttrPatch)
-        }
+        targets = self._declared_targets()
         for item in reversed(self._undo_order):
             if isinstance(item, HookPatch):
                 record = self._records[item.id]

@@ -12,10 +12,9 @@ up in the same idempotent :meth:`~megatron_musa_patch._engine.Engine.install`:
 3. **Imperative** -- :func:`megatron_musa_patch.apply`, e.g. from a test
    fixture or a launcher.
 
-The automatic channel deliberately does *not* touch anything until Megatron is
-actually imported: installing a CUDA compatibility layer into every Python
-process in the environment just because the package happens to be installed
-would be rude, and the training script is the only thing that needs it.
+Device adaptation waits for Megatron. The two MUSA-TE-only scripting/utils
+hooks may run at TE's earlier import boundary, supporting framework scripting
+before Core import. Registration itself imports no accelerator packages.
 """
 
 from __future__ import annotations

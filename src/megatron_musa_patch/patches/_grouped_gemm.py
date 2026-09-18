@@ -45,19 +45,21 @@ def gmm(a, b, tokens_per_expert, trans_b=False):
     """
     import torch
 
+    if a.ndim != 2 or b.ndim != 3:
+        raise ValueError("gmm expects a [tokens, K] and b [experts, K, N] (or [experts, N, K])")
+    if tokens_per_expert.ndim != 1 or tokens_per_expert.numel() != b.size(0):
+        raise ValueError("tokens_per_expert must contain one count per expert")
+    counts = tokens_per_expert.tolist()
+    if any(not isinstance(count, int) or count < 0 for count in counts):
+        raise ValueError("tokens_per_expert must contain nonnegative integer counts")
+    if sum(counts) != a.size(0):
+        raise ValueError(f"tokens_per_expert sums to {sum(counts)} but a has {a.size(0)} rows")
     if trans_b:
         b = b.transpose(-2, -1)
-    counts = tokens_per_expert.tolist()
-    outputs = []
-    start = 0
-    for count, weight in zip(counts, b):
-        end = start + count
-        outputs.append(torch.matmul(a[start:end], weight))
-        start = end
-    if start != a.size(0):
-        raise ValueError(f"tokens_per_expert sums to {start} but a has {a.size(0)} rows")
-    if not outputs:
-        return a.new_zeros((a.size(0), b.size(-1)))
+    if not counts:
+        # Even the zero-expert case retains both autograd edges.
+        return torch.matmul(a, b.sum(dim=0))
+    outputs = [torch.matmul(chunk, weight) for chunk, weight in zip(a.split(counts), b)]
     return torch.cat(outputs, dim=0)
 
 

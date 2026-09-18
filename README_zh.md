@@ -68,7 +68,7 @@ MEGATRON_LM_PATH=/path/to/Megatron-LM PYTHON=/path/to/venv/bin/python \
     bash examples/train_llama3_8b_musa.sh
 ```
 
-这些示例使用了特定参数，用于诊断，不能证明所有原始上游启动器均可不修改运行。`run_pretrain_smoke.sh` 会重建 `OUTPUT_DIR`，应指定专用临时目录。上游测试、训练及框架调用的分步验收方法见 [AGENTS.md](AGENTS.md)。
+这些示例使用了特定参数，用于诊断，不能证明所有原始上游启动器均可不修改运行。`run_pretrain_smoke.sh` 默认创建并打印唯一临时目录；显式 `OUTPUT_DIR` 必须不存在或为空，不会删除已有输出，相对路径以调用目录为准。上游测试、训练及框架调用的分步验收方法见 [AGENTS.md](AGENTS.md)。
 
 ## 需要哪种 Megatron？
 
@@ -205,6 +205,7 @@ MEGATRON_LM_PATH=/path/to/Megatron-LM PYTHON=/path/to/venv/bin/python \
 | `MEGATRON_MUSA_PATCH_ARCH` | `8.3` | 合成的 NVIDIA 架构号，例如 `9.0`。 |
 | `MEGATRON_MUSA_PATCH_BLOCK_LAYERNORM` | `local` | 设为 `upstream` 则保留 `LayerNormImpl = TENorm`。 |
 | `MEGATRON_MUSA_PATCH_TE_FUSED_LAYERNORM` | `0` | 设为 `1` 恢复上游 TE 融合 norm-linear，供升级验证。 |
+| `MEGATRON_MUSA_PATCH_TE_NORM` | `0` | 设为 `1` 保留原生 TE 独立 LayerNorm/RMSNorm，用于升级验证。 |
 | `MEGATRON_MUSA_PATCH_IGNORE_VERSION_GATES` | 空 | `1`/`true`/`*` 放行所有版本门控；包名列表只放行指定包。不会绕过能力探针和补丁选择。 |
 | `MEGATRON_MUSA_PATCH_ROPE_FUSION` | `1` | 设为 `0` 拒绝 apex 融合 RoPE 回退，上游会继续报告 `apply_rope_fusion` 不可用。 |
 | `MEGATRON_MUSA_PATCH_JIT_WARMUP` | `0` | 设为 `1` 保留上游的 JIT 预热。 |
@@ -224,7 +225,7 @@ MEGATRON_MUSA_RUN_INTEGRATION=1 MEGATRON_LM_PATH=/path/to/Megatron-LM \
 ## 排障
 
 * **`PatchTargetMissing`** —— 上游改名或删掉了符号；报错里有 patch id、符号和检测到的 Megatron 版本。用 `MEGATRON_MUSA_PATCH_DISABLE=<id>` 跳过，或更新目标（见[贡献指南](CONTRIBUTING_zh.md#6-如何新增一个-patch)）。
-* **训练仍然找不到 CUDA** —— 先确认激活状态：`python -c "import megatron_musa_patch as m, json; print(json.dumps(m.report(), indent=2))"`。全部 `pending` → 没 import 过 Megatron；报告为空 → 设了 `MEGATRON_MUSA_PATCH=0`，或 entry point 没装上：`python -c "from importlib.metadata import entry_points; print(entry_points(group='torch.backends'))"`。
+* **训练仍然找不到 CUDA** —— 先确认激活状态：`python -c "import megatron_musa_patch as m, json; print(json.dumps(m.report(), indent=2))"`。全部 `pending` 通常表示目标未导入；报告为空表示当前未注册补丁，例如设了 `MEGATRON_MUSA_PATCH=0`。另行检查 entry point 元数据：`python -c "from importlib.metadata import entry_points; print(entry_points(group='torch.backends'))"`。
 * **某个 patch 帮了倒忙** —— 用 `MEGATRON_MUSA_PATCH_DISABLE=<id>` 逐个定位，或 `MEGATRON_MUSA_PATCH=0` 整体关掉。`MEGATRON_MUSA_PATCH_DEBUG=1` 会打印每个 patch 的落地过程。
 
 ## 版本约定
@@ -246,24 +247,7 @@ TE < 2.3 interleaved 限制，告警后走 Megatron 的非融合实现。
 
 ### 声明式版本门控
 
-`AttrPatch` 和 `HookPatch` 都支持 `version_gates=("transformer_engine >=2.0,<2.1",)`。
-同一字符串内的比较以及 tuple 中的多个 gate 均为 AND；空 tuple 不限制版本。
-当前三个 TE norm 补丁声明了这个范围。这只表示补丁的适用范围，**不证明范围外的厂商实现已修复**。
-
-- 使用安装发行包元数据，不导入目标包；发行包名忽略大小写，`-`、`_`、`.` 等价。
-- 支持 `>=`、`>`、`<=`、`<`、`==`、`!=`；声明边界只接受点分数字。
-  按数字 release 比较并补零，`2.0 == 2.0.0`。安装版本的 `rc/dev/post/local` 后缀不参与排序，
-  例如 `2.0rc1` 和 `2.0+vendor` 均按 `2.0` 判断；这不是完整 PEP 440，epoch、通配符、`~=` 不支持。
-- 元数据缺失时保持原有目标解析/能力探测流程，不能据此认定版本匹配；已安装版本格式无法识别则跳过。
-  被 gate 排除的补丁在 `report()` 中为 `skipped`，`detail` 说明原因，`version_gates` 保留声明。
-  首次应用时同目标所有补丁均被排除，则不解析可能已被上游删除的符号。
-- `MEGATRON_MUSA_PATCH_IGNORE_VERSION_GATES=1`（也接受 `true` 或 `*`）放行全部版本门控；
-  `=transformer_engine,transformers` 只放行指定包；`0/false/off` 不放行。
-  这不会绕过 ONLY/DISABLE、依赖要求或源码/能力探针，也不会强制被工厂拒绝的补丁生效。
-  开关应在激活前设置；进程中修改开关不会撤销已安装包装或重新运行完成的 Hook。
-  改动后使用新进程，或对本包可逆部分执行 unapply/install。
-
-源码探针仅匹配当前厂商代码指纹，不执行模块；缺包或缺文件为 False，不可判定的布局为 None。
-目前调用方在 None 时保留兼容补丁，在 False 时退出；marker 因格式变化消失也可能触发退出，
-因此升级后仍要跑原始导入和数值回归。MoE topk 探针使用确定性输入并核对结果，不消耗训练 RNG。
-验证“上游已修复”应**禁用对应 patch** 后复跑原始用例；IGNORE_VERSION_GATES 是试用越界补丁的诊断开关。
+报告包含每条补丁的 `version_gates` 及跳过原因；元数据缺失时继续目标/能力探测。
+三个 TE norm 补丁声明 `transformer_engine >=2.0,<2.1`，这只表示适用范围，不证明
+其他版本已修复。上表 override 开关只绕过版本门控。数字比较及源码/能力探针规则见
+[贡献指南](CONTRIBUTING_zh.md#版本门控)。删除补丁前必须禁用它并重跑原始回归。

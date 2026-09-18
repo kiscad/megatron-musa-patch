@@ -115,3 +115,19 @@ def test_grouped_gemm_patches_are_registered():
     for patch in _grouped_gemm.PATCHES:
         if patch.id != "megatron.moe.grouped-gemm.torch-ops":
             assert patch.requires == ("megatron.moe.grouped-gemm.torch-ops",)
+
+
+@pytest.mark.parametrize("counts", [[2, 2, 0], [4], [-1, 5]])
+def test_gmm_rejects_invalid_expert_partitions(counts):
+    with pytest.raises(ValueError, match="tokens_per_expert"):
+        _grouped_gemm.gmm(torch.randn(4, 3), torch.randn(2, 3, 5), torch.tensor(counts))
+
+
+def test_gmm_zero_experts_preserves_gradient_edges():
+    a = torch.empty(0, 3, requires_grad=True)
+    b = torch.empty(0, 3, 5, requires_grad=True)
+    output = _grouped_gemm.gmm(a, b, torch.empty(0, dtype=torch.long))
+    assert output.shape == (0, 5)
+    output.sum().backward()
+    assert a.grad is not None
+    assert b.grad is not None

@@ -70,7 +70,7 @@ MEGATRON_LM_PATH=/path/to/Megatron-LM PYTHON=/path/to/venv/bin/python \
     bash examples/train_llama3_8b_musa.sh
 ```
 
-These are diagnostic examples with selected arguments, not proof that every original upstream launcher works unchanged. `run_pretrain_smoke.sh` recreates its `OUTPUT_DIR`; use a dedicated scratch directory. The step-by-step upstream-test, training and framework acceptance procedure is in [AGENTS.md](AGENTS.md).
+These are diagnostic examples with selected arguments, not proof that every original upstream launcher works unchanged. `run_pretrain_smoke.sh` defaults to a unique temporary directory and prints its path. An explicit `OUTPUT_DIR` must be new or empty; existing outputs are never deleted, and relative paths resolve from the calling directory. The step-by-step upstream-test, training and framework acceptance procedure is in [AGENTS.md](AGENTS.md).
 
 ## Which Megatron?
 
@@ -201,6 +201,7 @@ All three channels are idempotent. Automatic activation and explicit import regi
 | `MEGATRON_MUSA_PATCH_ARCH` | `8.3` | Synthetic NVIDIA capability, e.g. `9.0`. |
 | `MEGATRON_MUSA_PATCH_BLOCK_LAYERNORM` | `local` | `upstream` keeps `LayerNormImpl = TENorm`. |
 | `MEGATRON_MUSA_PATCH_TE_FUSED_LAYERNORM` | `0` | `1` restores upstream TE fused norm-linear for upgrade testing. |
+| `MEGATRON_MUSA_PATCH_TE_NORM` | `0` | Set `1` to keep native TE standalone LayerNorm/RMSNorm for upgrade validation. |
 | `MEGATRON_MUSA_PATCH_IGNORE_VERSION_GATES` | *(empty)* | `1`/`true`/`*` bypasses all version gates; a comma-separated distribution list bypasses only those gates. Capability probes and patch selection still apply. |
 | `MEGATRON_MUSA_PATCH_ROPE_FUSION` | `1` | `0` declines the apex fused-RoPE fallback, so upstream keeps reporting `apply_rope_fusion` as unavailable. |
 | `MEGATRON_MUSA_PATCH_JIT_WARMUP` | `0` | `1` keeps upstream's JIT warm-up. |
@@ -233,7 +234,7 @@ It runs the unchanged upstream script, overriding `NUM_LAYERS`, `TRAIN_SAMPLES`,
 ## Troubleshooting
 
 * **`PatchTargetMissing`** — upstream renamed or removed a symbol; the message names the patch, the symbol and the detected Megatron version. Skip it with `MEGATRON_MUSA_PATCH_DISABLE=<id>`, or update the target (see [the contributor guide](CONTRIBUTING.md#6-adding-a-patch)).
-* **Training still cannot find CUDA** — check activation with `python -c "import megatron_musa_patch as m, json; print(json.dumps(m.report(), indent=2))"`. All `pending` → Megatron was never imported. Empty report → `MEGATRON_MUSA_PATCH=0` is set, or the entry point is not installed: `python -c "from importlib.metadata import entry_points; print(entry_points(group='torch.backends'))"`.
+* **Training still cannot find CUDA** — check activation with `python -c "import megatron_musa_patch as m, json; print(json.dumps(m.report(), indent=2))"`. All `pending` usually means the targets have not been imported. An empty report means no patches were registered, for example because `MEGATRON_MUSA_PATCH=0` is set. Check entry-point metadata separately: `python -c "from importlib.metadata import entry_points; print(entry_points(group='torch.backends'))"`.
 * **A patch made things worse** — bisect with `MEGATRON_MUSA_PATCH_DISABLE=<id>`, or switch everything off with `MEGATRON_MUSA_PATCH=0`. `MEGATRON_MUSA_PATCH_DEBUG=1` logs every patch as it lands.
 
 ## Versioning
@@ -257,30 +258,10 @@ wrappers when their TE < 2.3 version guard would reject the call.
 
 ### Declarative version gates
 
-Both `AttrPatch` and `HookPatch` accept `version_gates=("transformer_engine >=2.0,<2.1",)`.
-Comparisons within a string and gates within the tuple are AND-ed; an empty tuple imposes no restriction.
-The three TE norm patches currently declare this range. A range describes patch applicability,
-**not evidence that the vendor implementation outside the range is fixed**.
-
-- Gates read distribution metadata without importing packages. Names are case-insensitive;
-  hyphens, underscores and dots are equivalent.
-- Supported operators: `>=`, `>`, `<=`, `<`, `==`, `!=`. Bounds must be dotted integers.
-  Numeric release tuples are zero-padded, so `2.0 == 2.0.0`. Installed rc/dev/post/local
-  suffixes do not affect ordering: `2.0rc1` and `2.0+vendor` count as `2.0`.
-  This is not full PEP 440; epochs, wildcards and `~=` are unsupported.
-- Missing metadata leaves target resolution/capability checks in charge; it is not a verified match.
-  Unrecognized installed versions block. Reports retain the declaration in `version_gates` and
-  explain blocked gates in the skipped record's `detail`. On first application, if every patch
-  on a target is excluded, the engine does not resolve a potentially removed upstream symbol.
-- `MEGATRON_MUSA_PATCH_IGNORE_VERSION_GATES=1` (also `true` or `*`) bypasses all version gates;
-  `=transformer_engine,transformers` bypasses only those packages; `0/false/off` bypasses none.
-  ONLY/DISABLE, companion requirements and source/capability probes still apply.
-  Set switches before activation. Changing them does not undo existing wrappers or rerun hooks;
-  use a fresh process, or unapply/install for this package's reversible changes.
-
-Source markers are build fingerprints, not correctness proofs. Probing does not execute modules:
-missing packages/files return False, unsupported layouts return None. Current callers keep their
-workarounds on None and decline on False; even a formatting change may remove a marker, so upgrades
-still require original import and numerical regression tests. The MoE topk probe uses deterministic
-input and checks the result without consuming training RNG. To verify an upstream fix, disable the
-patch and rerun its original regression; IGNORE_VERSION_GATES instead trials an out-of-range patch.
+Reports include each patch's `version_gates` and skip reason. Missing metadata
+keeps target/capability checks in charge. The three TE norm patches declare
+`transformer_engine >=2.0,<2.1`; this is applicability, not proof that other
+versions are fixed. The override switch above bypasses only version gates.
+See the [contributor guide](CONTRIBUTING.md#version-gates) for numeric comparison
+rules and source/capability probes. Disable the patch and rerun its original
+regression before concluding a workaround can be removed.

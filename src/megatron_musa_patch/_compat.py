@@ -149,7 +149,7 @@ def megatron_importable() -> bool:
       ``importlib.util.find_spec("megatron")`` would run the pending hook
       patches -- building the whole torch.cuda compatibility layer in an
       unrelated process.  The walk below skips every finder marked with
-      :data:`META_PATH_WATCHER_MARKER`, mirroring ``Engine._find_real_spec``.
+      :data:`META_PATH_WATCHER_MARKER`, using the same resolver as the engine watcher.
     """
     if sys.modules.get("megatron") is not None:
         return True
@@ -176,8 +176,7 @@ def find_spec_without_watchers(fullname: str, path=None, target=None):
 def check_megatron_present(*, strict: bool | None = None) -> bool:
     """Warn (or raise) when nothing provides ``megatron``.
 
-    Only called from the explicit entry points (:func:`apply`,
-    ``import megatron_musa_patch``).  The automatic channel must stay silent
+    Only called from the immediate :func:`apply` entry point.  The automatic channel must stay silent
     here: it runs at the end of ``import torch`` in *every* process in the
     environment, most of which will never import Megatron.
     """

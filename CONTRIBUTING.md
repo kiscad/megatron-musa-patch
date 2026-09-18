@@ -1,585 +1,269 @@
 # Contributing to megatron-musa-patch
 
-How this repository is put together, and how to add to it. Read this before
-opening a change: section [1](#1-ground-rules) lists the constraints a patch has
-to satisfy, [6](#6-adding-a-patch) walks through adding one, and
-[11](#11-contributor-checklist) is the checklist to run before you push.
-
-For *using* the package, see [`README.md`](README.md) instead.
-Coding agents must also read [`AGENTS.md`](AGENTS.md) for the operational workflow,
-test commands and completion criteria. The goal is unchanged upstream unit tests
-and training scripts on MUSA, plus unchanged Megatron-Core calls from frameworks
-such as ms-swift. A successful adapted example is only one part of that goal.
-
-<https://github.com/kiscad/megatron-musa-patch> — branch `v0.16.1-dev` targets
-Megatron-LM `core_v0.16.1`.
-
----
+This guide describes the design and extension contracts. [README.md](README.md)
+covers installation, switches and fallback costs; [AGENTS.md](AGENTS.md) owns the
+operational workflow and full acceptance commands. [中文](CONTRIBUTING_zh.md).
+The ledger in `patches/` and `report()` is the source of truth for patch metadata.
 
 ## 1. Ground rules
 
-Six constraints shape every design decision here. A change that violates one of
-them will be rejected even if it "works":
-
-1. **Never copy upstream source.** Patches wrap or replace individual symbols.
-   The moment a Megatron file is vendored, the two copies start drifting.
-2. **Do not require callers to arrange patch imports.** Default autoload must
-   activate before Megatron uses CUDA APIs. Support early and late explicit
-   activation for diagnostics within the engine's limits: existing instances,
-   closures and class bases cannot be repaired after the fact. A process that
-   never imports Megatron should retain pending, inactive patches, except for
-   the MUSA-fork-only `megatron.te.factory-shim.torchscript-compat` and
-   `megatron.te.utils-module.safe-seed` hooks at the TE import boundary.
-   These support ms-swift scripting before Core import; do not extend this
-   exception to device adaptation or other hooks.
-3. **Keep activation lazy and scoped.** In a process that has not imported
-   Megatron, importing this package only registers patches and a watcher; it
-   must not import torch/Megatron or activate the device shim. Already-loaded
-   targets may be patched; explicit `apply()` intentionally imports targets.
-4. **Every patch is deletable and reviewable.** Each one records `rationale`
-   (the observed root cause), `strategy` (what the replacement does), `upstream`
-   and `remove_when` (the condition, tied to tests, under which it goes). A
-   patch whose `remove_when` condition has been met gets deleted, not kept
-   "just in case".
-5. **Keep upstream and callers unchanged.** Do not fix compatibility by editing
-   Megatron source, tests, fixtures, assertions or training scripts, or by
-   adding MUSA/CUDA branches or required patch imports to ms-swift. Implement
-   adaptation in this package and exercise original entry points with autoload.
-6. **Preserve the public contract and report gaps honestly.** Preserve signatures,
-   configuration semantics, output structure, gradients, distributed behaviour
-   and checkpoint compatibility. A fallback must preserve numerical correctness
-   within justified tolerances and disclose performance/feature limits. Core
-   fixes must work without `megatron.training`; skips, forced flags and smoke
-   runs are not evidence of full compatibility.
-
----
+- Keep upstream source, tests and callers unchanged. Core compatibility must also
+  work with a `megatron-core` wheel, without `megatron.training` or caller-side
+  MUSA branches. New capabilities implemented only in a higher-level framework
+  belong to that framework.
+- Adapt individual symbols, reusing upstream implementations where possible.
+  Preserve arguments, outputs, gradients, RNG, distributed synchronization and
+  checkpoint keys/sharding. Document fallback costs and limitations.
+- Keep registration standard-library-only. Import torch, Megatron, TE and
+  torchada inside runtime callbacks. Importing torchada has global side effects;
+  never import it merely to test availability.
+- Declare patches through the existing engine. Every built-in record needs a
+  root cause, strategy, upstream location and testable removal condition.
+  Hooks owning state must provide `undo` and clean up partial failures.
+- Retain ownership checks, idempotence and failure diagnostics. Unit tests and
+  adapted smoke runs establish only their exercised paths, not full compatibility.
 
 ## 2. Repository layout
 
-```
-src/megatron_musa_patch/
-├── __init__.py            Public API; installs the watcher on import
-├── activation.py          The three activation channels; owns PATCHES registration
-├── _engine.py             The patch engine: registry, import hook, apply/unapply/report
-├── _compat.py             Upstream version detection, target resolution, guards
-├── _env.py                Every environment switch, in one place
-├── _errors.py             Exception types
-├── backends/
-│   └── torch_cuda.py      torchada + the 4 Megatron-specific torch overrides
-└── patches/
-    ├── __init__.py        The ledger: aggregates PATCHES from the modules below
-    ├── _torch_backend.py  Hook that installs the torch.cuda layer
-    ├── _device_arch.py    NVIDIA-scale device capability / arch version
-    ├── _distributed.py    Clean MCCL process-group teardown
-    ├── _transformer_engine.py  Ignore upstream TE version thresholds on MUSA; TE calls dispatched by real signature
-    ├── _layer_norm.py     Pure-PyTorch FusedLayerNorm, block LayerNormImpl
-    ├── _rope.py           apex fused RoPE where Transformer Engine provides none
-    ├── _training.py       fused_kernels.load / set_jit_fusion_options no-ops, DP-overlap policy, profiler selection
-    ├── _checkpointing.py  No-fork distributed-checkpoint writer
-    └── _control_collectives.py  Module-local torch proxies: startup timestamps, checkpoint host barrier, signal safe-globals
+| Location | Responsibility |
+|---|---|
+| `__init__.py`, `activation.py` | Public API and activation channels |
+| `_engine.py` | Registration, imports, target transactions, aliases and undo |
+| `_compat.py`, `_errors.py` | Metadata, source probes, target resolution and errors |
+| `_env.py` | Lazy environment switches and their defaults |
+| `backends/` | Shared lazy runtime probe; torchada integration and four owned device overrides |
+| `patches/_*.py` | Domain-specific factories/hooks with their ledger records |
+| `patches/__init__.py` | Aggregation and intentional same-target ordering |
+| `tests/test_*.py` | Engine, contract, numerical and opt-in integration regressions |
+| `tests/*_smoke.py`, `examples/` | Hardware workers and diagnostic launchers |
+| `scripts/ci/`, `pyproject.toml` | Shared checks and tool configuration |
 
-tests/
-├── conftest.py                  Fresh-Engine and fake-module fixtures (unit runs stay CPU-safe)
-├── test_engine.py               Engine core (no GPU, no Megatron)
-├── test_engine_lifecycle.py     Chained patches, ownership, failure atomicity
-├── test_activation.py           Activation channels and entry-point deferral (subprocess)
-├── test_ledger.py               Ledger contract + scope guard rails
-├── test_device_arch.py          Synthetic capability hook
-├── test_layer_norm.py           Norm fallback class contract
-├── test_te_layer_norm.py        TE norm-linear fallback contract (CPU + opt-in MUSA)
-├── test_transformer_engine.py    MUSA Transformer Engine version-check policy
-├── test_rope.py                 Fused-RoPE kernel selection and unfused demotion (CPU + opt-in MUSA)
-├── rope_smoke.py                Hardware worker: apex kernels vs Megatron's unfused reference
-├── test_training_profile.py     validate_args wrappers (overlap / profile)
-├── test_checkpointing.py        Serial writer vs upstream protocol (stubbed upstream)
-├── test_control_collectives.py  Control-collective proxies vs stubbed and real upstream (opt-in)
-├── test_torch_cuda.py           Backend layer: CPU-safe stubs + real MUSA contracts
-└── test_megatron_integration.py End-to-end against a real Megatron (subprocess, opt-in)
-
-examples/                       run_pretrain_smoke.sh (2-GPU self-check), train_llama3_8b_musa.sh (MUSA llama3-8b), train_llama3_8b_h100_fp8.sh (upstream launcher)
-```
-
-Roughly: `_engine.py` is the machinery, `patches/` is the content, and the two
-never need to know much about each other.
-
----
+Patch modules do not import sibling patches. Shared runtime checks belong in
+`backends`, generic lifecycle rules in the engine, and operator choices in the
+corresponding patch. See [PATCH_INDEPENDENCE.md](docs/PATCH_INDEPENDENCE.md) for
+the current cooperation boundaries.
 
 ## 3. The patch engine
 
-### 3.1 A patch is data
+### Records and lifecycle
 
-```python
-AttrPatch(
-    id="megatron.transformer-block.layer-norm.impl-local",
-    target="megatron.core.transformer.transformer_block:LayerNormImpl",
-    replace=_block_layer_norm_impl,        # Callable[[current_value], replacement]
-    rationale="The affected TE MUSA norm op aborted in allocateSpace; ...",
-    strategy="Bind the block's default norm to the patched local class; ...",
-    upstream="NVIDIA/Megatron-LM megatron/core/transformer/transformer_block.py",
-    remove_when="BLOCK_LAYERNORM=upstream passes LayerNorm/RMSNorm parity tests",
-)
-```
+`AttrPatch(target="module:Class.method", replace=factory)` receives the current
+value. Return a replacement, or `None` to decline. Factories for one target
+compose in registration order and commit as one transaction. Static/class
+method descriptors and inherited-attribute ownership are preserved.
 
-Two dataclasses, both in `_engine.py`:
-
-| type | meaning |
-|---|---|
-| `AttrPatch` | Replace `<module>:<attribute>` with `replace(current)`. `target` may address a nested attribute (`module:Class.method`). Same-target patches chain: factories compose in registration order over one binding, repeat application never stacks wrappers, and `unapply()` restores the original in one step. |
-| `HookPatch` | Run a callable before `trigger` (a module name) is imported; return `False` to decline. Hooks that own runtime state must pass `undo`, which `unapply()` calls in reverse order. |
-
-Because `replace` receives the *current* object, a patch can wrap the original
-with `functools.wraps` rather than replacing it outright. Returning `None` means
-"leave it alone" and is recorded as `skipped` — that is how a patch opts out
-conditionally (see `MEGATRON_MUSA_PATCH_BLOCK_LAYERNORM`).
-
-### 3.2 Lifecycle
-
-Use `AttrPatch.requires=("companion.id",)` only for unavoidable cooperation on
-different attributes of the same module. The engine orders those targets,
-rejects dependency cycles/cross-module requirements and reports a consumer as
-`skipped` when its companion is absent, disabled or declined. It never expands
-`ONLY` or overrides `DISABLE`. Keep independent factories independent; test
-single selections, reversed order and uninstall, as in
-`tests/test_patch_independence.py` and `tests/test_engine_dependencies.py`.
+`HookPatch(trigger="module", run=callback, undo=cleanup)` runs before import.
+Return `False` to decline. Hooks without undo remain applied across uninstall,
+because their effects cannot be claimed as restored. A failing hook must undo
+its own partial mutations; the engine does not make imports a global transaction.
 
 ```mermaid
 flowchart TD
-    A(["import megatron_musa_patch"]) --> C
-    B(["import torch<br/>(torch.backends entry point fires)"]) --> C
-
-    C["activation.install()<br/>register PATCHES with ENGINE<br/>insert _ImportWatcher at sys.meta_path[0]<br/>apply targets already in sys.modules"]
-
-    C --> W{"_ImportWatcher<br/>intercepts an import"}
-
-    W -->|"megatron"| H["run its pending HookPatches<br/>(this installs the torch.cuda layer)"]
-    W -->|"a patch's target module"| P["return the real spec with<br/>spec.loader wrapped"]
-
-    H --> M["megatron/__init__ executes"]
-    P --> E["_PostExecLoader.exec_module()<br/>the real module executes first"]
-    E --> S["_apply_for_module()<br/>setattr(owner, leaf, replacement)<br/>_rebind_from_imports()"]
+    A["explicit import / torch.backends callback"] --> B["register + install watcher"]
+    B --> C["apply already-loaded targets"]
+    B --> D["watched import"]
+    D --> E["run pre-import hooks"]
+    E --> F["execute original module"]
+    F --> G["order companion targets"]
+    G --> H["compose factories + commit binding and aliases"]
+    H --> I["report; reverse owned changes on unapply"]
 ```
 
-On the watched import path, a patch lands after its target module executes and
-before the import returns to consumers. Default autoload should make a special
-caller import unnecessary. Late activation still has the instance, closure and
-class-base limitations described above; test the real caller's import path.
+`requires=("companion.id",)` declares a dependency on another attribute in the
+same module. Missing, disabled, version-excluded or declined companions leave
+the consumer skipped; the engine never enables them implicitly. If no factory
+can run and no binding exists, target lookup is skipped too. Cycles, cross-module
+requirements and requirements on the same target are rejected. A later
+registration can make a skipped consumer eligible.
 
-### 3.3 Details that are easy to get wrong
+Same-name function/class/builtin aliases are repaired only within the configured
+`rebind_prefixes` (default `megatron`). Primitive flags and separately declared
+targets are excluded. Reload and live registration rebuild from the baseline;
+aliases imported after the first application follow the new generation as well.
+Existing instances, closures and class bases cannot be repaired this way.
 
-* **`find_spec` re-entrancy.** `importlib.util.find_spec("a.b")` imports the
-  parent package and walks `sys.meta_path` from the top — which would call our
-  own finder again and recurse. `Engine._find_real_spec` iterates the *other*
-  finders directly.
-* **`LazyLoader`.** A lazy loader defers `exec_module` past our hook and
-  rewrites `spec.loader` to the inner loader, bypassing us on reload. The
-  watcher unwraps it and forces eager loading for patched modules.
-* **`from x import y`.** `import` binds by value, so a module that already did
-  `from x import y` keeps the old object. The engine rebinds same-name aliases
-  of *functions, classes and builtins* in modules under `megatron.` only —
-  flags and primitives are never swept globally, and modules that declare the
-  same symbol as their own patch target are left to their own lifecycle.
-* **Reload.** `importlib.reload` re-executes the module body, restoring the
-  original. `_apply_target` therefore re-checks identity on every call and
-  rebuilds the chain from the recorded baseline instead of stacking wrappers.
-* **Ownership.** A binding remembers whether the module originally owned the
-  attribute: on `unapply()` owned attributes are restored and inherited ones
-  are deleted, attributes someone else wrote after the patch are left alone,
-  and a target changed outside the engine raises `PatchConflict`.
-* **Atomic chains.** A target's chain (attribute + aliases) commits only when
-  every factory succeeds; a failure rolls back to the baseline and is recorded
-  as `failed`. A failing hook must clean up its own partial mutations, and a
-  hook whose `undo` failed blocks reinstall until `unapply()` succeeds.
-* **Absent modules.** When a target module is simply not installed (for example
-  `megatron.training` with only the `megatron-core` wheel), the watcher records
-  `skipped` once and stops watching, so the lookup is not repeated on every
-  import.
+Internal availability probes use `_compat.find_spec_without_watchers`, without
+importing parents or running hooks. External speculative `find_spec` calls can
+still trigger hooks. Watched `LazyLoader` modules are executed eagerly so patches
+apply before consumers use their attributes.
 
-### 3.4 Failure behaviour
+`unapply()` restores only bindings still owned by the engine and attempts all
+cleanups. Failed cleanups remain journaled and block reinstall until a retry
+succeeds. Third-party replacements are preserved. Configure before training;
+do not mutate the registry concurrently with running model code.
 
-`require_attr` raises `PatchTargetMissing` naming the patch id, the dotted
-symbol and the detected Megatron version. A `replace` callable that raises gets
-wrapped in `MegatronMusaPatchError` with the same context. Both are deliberate:
-a silent no-op patch is far more expensive to debug than a loud failure at
-import time.
+### Version gates
 
----
+Both record types accept `version_gates=("transformer_engine >=2.0,<2.1",)`.
+The shared validator runs at construction. Runtime checks read distribution
+metadata without importing the package; only parsed declarations are cached.
+
+- Comparisons within and across gates are AND-ed. Supported operators are
+  `>=`, `>`, `<=`, `<`, `==`, `!=`; bounds are dot-separated integers.
+- Numeric releases are zero-padded (`2.0 == 2.0.0`). Installed `rc/dev/post/local`
+  suffixes do not affect ordering. This is not full PEP 440; epochs, wildcards
+  and `~=` are unsupported. Distribution names normalize case and `-`, `_`, `.`.
+- Missing metadata permits normal target/capability handling; malformed installed
+  versions skip the patch. Neither result proves compatibility.
+- `MEGATRON_MUSA_PATCH_IGNORE_VERSION_GATES=1`/`true`/`*` bypasses all gates;
+  a comma-separated package list bypasses only those packages. `0`/`false`/`off`
+  bypasses none. Selection, dependencies and capability probes still apply.
+- Set switches before activation. Use a fresh process after changing them, or
+  uninstall/reinstall only the reversible part. Reports retain gates and reasons.
+
+Source probes return `True` for matching markers, `False` for absent sources or
+markers, and `None` for undecidable layouts. Current callers keep their fallback
+on `None`. A missing marker or an excluded version is not removal evidence:
+disable the patch and rerun the original failure. Capability probes must preserve
+training RNG and check results to expose asynchronous failures.
 
 ## 4. Activation
 
-`activation.py` owns the only three ways in, and all of them end in the same
-idempotent `ENGINE.install()`:
-
-| channel | entry point | notes |
+| Channel | Entry | Behavior |
 |---|---|---|
-| automatic | `[project.entry-points."torch.backends"]` → `megatron_musa_patch:_torch_backend_autoload` | PyTorch calls it at the very end of `import torch`. This is the official out-of-tree device-backend hook (torch_musa and torch_npu register there too). |
-| explicit | `import megatron_musa_patch` | Registers and watches; applies nothing until Megatron appears. |
-| imperative | `megatron_musa_patch.apply()` | Registers, watches, *and* imports target modules to apply everything now. Used by tests. |
+| Automatic | `torch.backends` → `megatron_musa_patch:torch_backend_autoload` | Install during the end of torch initialization, inside a logging/error boundary |
+| Explicit | `import megatron_musa_patch` | Register and watch; patch already-loaded targets |
+| Immediate | `megatron_musa_patch.apply()` | Also import targets and apply now; diagnostic use |
 
-`_torch_backend_autoload` must never raise: it runs inside `import torch`, and
-an exception there breaks every process in the environment. It catches
-everything and logs.
+Device adaptation waits for Megatron. Only the MUSA-fork-specific
+`megatron.te.factory-shim.torchscript-compat` and
+`megatron.te.utils-module.safe-seed` hooks may run at the earlier TE import
+boundary to support scripting before Core import. They do not authorize other
+early hooks. Keep automatic activation failures from breaking `import torch`.
+`AUTOLOAD=0` disables the automatic channel; `MEGATRON_MUSA_PATCH=0` disables all.
 
-For a fresh process, installing the watcher does not activate the torch layer:
-its `HookPatch` waits for `megatron`. Installing after targets are already loaded
-can apply patches immediately, and explicit `apply()` imports targets itself.
-Do not use an explicit-import-only test as proof that autoload works.
+## 5. Backend ownership
 
----
+torchada owns CUDA-to-MUSA API/device/backend translation. This package adds
+live availability, CUDA tensor type names, the graph-class alias and tensor
+subclass `.musa()` transfers. Its journal restores the post-torchada baseline,
+including on activation failure, and preserves subsequent third-party writes.
 
-## 5. The `torch.cuda` compatibility layer
-
-`backends/torch_cuda.py` is deliberately thin. It splits the work:
-
-* **torchada** — a hard dependency — owns the mechanical translation:
-  `torch.cuda.*` → `torch.musa.*`, `torch.device` patching, tensor-factory
-  rewriting, `nccl` → `mccl`. That is the half that breaks when *torch_musa*
-  moves, and it is Moore Threads' package to maintain. Note that importing
-  torchada replaces `sys.modules["torch.cuda"]` with a caching proxy module
-  and mutates factories/distributed state with no undo API — those effects
-  are external and not reversible from here.
-* **This module** owns the four things Megatron needs that torchada leaves
-  out. That is the half that breaks when *Megatron* moves.
-
-| override | why it exists |
-|---|---|
-| live `is_available()` | torchada deliberately leaves it `False`; Megatron asserts on it. Bound to `torch.musa.is_available`, not a constant. |
-| `Tensor.type()` names | reports `torch.musa.*`; Megatron's optimizer compares against `torch.cuda.*`. Conversions and CPU names pass through. |
-| `CUDAGraph` alias | torchada's `torch.cuda.graphs` has no `CUDAGraph`; expose `MUSAGraph` under the CUDA spelling. |
-| `Tensor.musa()` for subclasses | torch_musa's C dispatch shim drops `non_blocking`/`memory_format` and mishandles CPU targets for tensor subclasses (TE `Float8Tensor`); route subclasses through `.to()`. |
-
-Our overrides are journaled and restored to the *post-torchada* baseline by
-`unapply()`; a third-party replacement made afterwards is left untouched, and
-a failed activation rolls the overrides back. Removing torchada's own effects
-requires a fresh process. We still never alias
-`sys.modules["torch.cuda"] = torch.musa` ourselves: the namespaces genuinely
-differ (`torch.cuda.memory` vs `torch.musa.core.memory`, and so on).
-
-Behaviour torchada already provides is **not** re-implemented. It is asserted in
-`tests/test_torch_cuda.py` instead, so a torchada regression fails loudly rather
-than quietly depending on an override we wrote ourselves. That file is
-organised into "overrides we own" and "contract with torchada" for exactly this
-reason.
-
-One trap worth remembering: `import torchada` *applies its patches* as an import
-side effect. Never probe for it with `import torchada` — use
-`importlib.util.find_spec`. An earlier revision of this package imported it just
-to build a list of available modes, and thereby installed a global shim the
-caller had not asked for.
-
----
+Import-time changes by torchada/torch_musa are not reversible here. Use a new
+process for complete isolation; never directly alias `sys.modules["torch.cuda"]`
+to `torch.musa`. Test delegated torchada behavior instead of copying it.
+`backends.musa_available()` reads the current runtime without importing torchada
+or caching device availability.
 
 ## 6. Adding a patch
 
-1. **Find the smallest seam.** Prefer, in order:
-   * an existing Megatron implementation or supported extension point that can
-     preserve the caller's original configuration (a flag that callers must
-     change is a diagnostic workaround, not a completed compatibility fix),
-   * a wrapper around one function,
-   * a replacement class,
-   * a minimal adaptation of one function — last resort; document the source,
-     semantic differences and upgrade checks in `rationale`/`strategy`.
-2. **Write the record** in the relevant `patches/_*.py` module (or a new one,
-   registered in `patches/__init__.py`'s `MODULES`).
-3. **Fill in `rationale`, `strategy`, `upstream` and `remove_when`.**
-   `tests/test_ledger.py` enforces all four — this is not optional
-   documentation. A hook that owns runtime state also needs `undo`.
-4. **Keep `patches/` importable without torch.** Import `torch` inside the
-   `replace` callable, never at module scope. `patches/_checkpointing.py` is the
-   reference for this.
-5. **Prefer `_env` switches over hardcoding.** Read them at call time (the
-   helpers are lazy), so tests and wrappers can set them just before importing
-   Megatron.
-6. **Add a meaningful regression test.** Engine behaviour uses fake modules;
-   patch contracts belong in the relevant `test_*.py`. Run integration tests
-   that activate the real patch set in fresh subprocesses, then rerun the
-   original failing upstream test or caller without changing it. A stub alone
-   cannot establish API or numerical compatibility.
-
-### Worked example
-
-Say `megatron.core.transformer.moe.router` grows a `TopKRouter` that assumes
-NVIDIA-specific behaviour:
+1. Reproduce the original failure and locate the smallest upstream seam. Keep
+   core fixes independent of training-only entry points.
+2. Add a factory/hook in the owning `patches/_*.py` module. Use `functools.wraps`
+   on wrappers and preserve the unaffected path.
+3. Fill `id`, `target`/`trigger`, `rationale`, `strategy`, `upstream`, `remove_when`.
+   Add `undo` for owned hook state, `requires` for same-module cooperation, and
+   version/source/capability guards supported by evidence.
+4. For a new module, add its import and entry in `patches.MODULES`. Do not reorder
+   unrelated same-target wrappers. Keep registration free of accelerator imports.
+5. Add a regression that fails before the fix, then exercise the real caller.
+   Document switches in `_env.py` and both READMEs; keep both guides consistent.
 
 ```python
-# src/megatron_musa_patch/patches/_router.py
-from __future__ import annotations
-
-from typing import Any
-
-from .._engine import AttrPatch
-
-__all__ = ["PATCHES"]
-
-
-def _router_impl(original: Any) -> Any:
-    """Wrap rather than replace: keep upstream's behaviour, change one branch."""
-    import functools
-
-    @functools.wraps(original)
-    def forward(self, *args, **kwargs):
-        # ... MUSA-specific adjustment ...
-        return original(self, *args, **kwargs)
-
-    return forward
-
-
-PATCHES = (
-    AttrPatch(
-        id="megatron.moe.router.topk-forward",
-        target="megatron.core.transformer.moe.router:TopKRouter.forward",
-        replace=_router_impl,
-        rationale="...the observed failure and why...",
-        strategy="...what the wrapper changes and preserves...",
-        upstream="NVIDIA/Megatron-LM megatron/core/transformer/moe/router.py",
-        remove_when="...condition, tied to tests, under which this goes...",
-    ),
-)
-```
-
-Then add it to `MODULES` in `patches/__init__.py`, run
-`MEGATRON_MUSA_PATCH_DEBUG=1 python -c "import megatron_musa_patch as m; m.apply()"`
-and confirm the new id reports `applied`.
-
-### Extending from outside the package
-
-Downstream projects can register their own patches without forking:
-
-```python
+from functools import wraps
 from megatron_musa_patch import AttrPatch, ENGINE
 
-ENGINE.register([AttrPatch(id="my-project.x", target="...", replace=lambda old: ...)])
+
+def replace(original):
+    @wraps(original)
+    def wrapped(*args, **kwargs):
+        return original(*args, **kwargs)  # implement the narrowly justified adaptation
+    return wrapped
+
+
+ENGINE.register([AttrPatch(
+    id="my-project.example",
+    target="my_project.module:function",
+    replace=replace,
+    rationale="Observed failure and affected environment",
+    strategy="Exact adaptation and preserved contracts",
+    upstream="Original file and symbol",
+    remove_when="Unpatched regression passes on the upgraded stack",
+)])
 ENGINE.apply_now()
 ```
 
-They get the same ordering guarantees, drift detection and `report()` entries.
-This is an optional extension API; general MUSA compatibility belongs in this
-package and must not depend on downstream registration.
+External registration is optional extensibility; callers must not need it for
+this package's built-in compatibility contract.
 
----
+## 7. Tests and local checks
 
-## 6.5 Local gates (pre-commit / pre-push)
-
-All Git operations happen inside the development container. The check logic
-lives in `scripts/ci/`, and local hooks plus the GitHub quality gate reuse
-the same scripts:
-
-| Stage | Trigger | Script | Contents |
-|---|---|---|---|
-| commit | `git commit` | `scripts/ci/quick-check.sh` | ruff / black / isort fast static checks (seconds) |
-| push | `git push` | `scripts/ci/lint.sh` + `unit-tests.sh` | full lint + mypy + unit tests (~30 s) |
-| PR/main | GitHub Actions | `scripts/ci/pre-push.sh` | final guard running the same scripts (lightweight CPU container; MUSA hardware cases skip) |
-
-One-time bootstrap (installs `.git/hooks/pre-commit` and `pre-push`):
+Use the interpreter matching the vendor stack. Do not upgrade torch/TE merely
+to run development tools. With the required test/tools already installed:
 
 ```bash
+python -m pip install --no-deps -e '.[dev]'
+python -m pytest tests -q
+bash scripts/ci/pre-push.sh
+# Optional local Git hooks; requires pre-commit and the tools used by scripts/ci.
 bash scripts/setup-dev-hooks.sh
 ```
 
-Regular `git commit` / `git push` then runs the corresponding checks
-automatically; failures block the commit/push. Do not put hardware smokes,
-distributed or real-training tasks into pre-push by default -- heavy
-verification belongs to dedicated hardware rounds (see "7. Testing"),
-otherwise developers grow into the `--no-verify` habit.
+`--no-deps` does not install dev dependencies. CI uses the same scripts;
+`quick-check.sh` runs ruff/black/isort, `lint.sh` also runs mypy, and
+`unit-tests.sh` runs pytest. Hardware workers are not launched by default.
 
-Manual run: `bash scripts/ci/pre-push.sh`; tool settings live in
-`pyproject.toml` (`[tool.ruff]`/`[tool.isort]`/`[tool.black]`/`[tool.mypy]`).
-
----
-
-## 7. Testing
+Engine changes require activation, lifecycle, dependency, version-gate and ledger
+regressions. Operator changes need forward/backward references and relevant
+checkpoint contracts. Unit fixtures isolate watchers and synthetic modules;
+full patch activation belongs in subprocesses. Control distribution metadata in
+tests rather than relying on whichever vendor libraries happen to be installed.
 
 ```bash
-python -m pip install --no-deps -e ".[dev]"
-python -m pip install pytest pytest-cov   # dev extra 不会被 --no-deps 安装
-python -m pytest -q    # works on CPU; hardware-dependent cases may skip
 MEGATRON_MUSA_RUN_INTEGRATION=1 MEGATRON_LM_PATH=/path/to/Megatron-LM \
-    python -m pytest tests/test_megatron_integration.py -q    # real-stack checks (subprocess)
+    python -m pytest tests -q
+MEGATRON_LM_PATH=/path/to/Megatron-LM PYTHON=/path/to/venv/bin/python NPUS=2 \
+    bash examples/run_pretrain_smoke.sh
 ```
 
-| file | covers | needs |
-|---|---|---|
-| `test_engine.py` | import hook, alias repair, reload, unapply, filters, error paths | nothing (synthetic modules) |
-| `test_engine_lifecycle.py` | chained same-target patches, ownership, failure atomicity, hook undo | nothing |
-| `test_activation.py` | activation channels, entry-point deferral, disabled apply | nothing (subprocess) |
-| `test_ledger.py` | ledger contract: unique ids, non-empty `rationale`/`strategy`/`upstream`/`remove_when`, hook undo, probes do not wake the watcher | nothing |
-| `test_device_arch.py` / `test_layer_norm.py` / `test_training_profile.py` / `test_checkpointing.py` | per-patch contracts against stubbed upstream APIs | megatron-core (some) |
-| `test_te_layer_norm.py` | the TE norm-linear fallback: class dispatch, RMSNorm passthrough, sharded state dict | CPU contract + megatron-core; MUSA rounds opt-in |
-| `test_rope.py` | fused-RoPE selection: apex kernels only where upstream has none, TE kernels untouched, `ROPE_FUSION=0`, interleaved/context-parallel demotion without mutating shared config | nothing; the parity round runs `rope_smoke.py` on MUSA, opt-in |
-| `test_control_collectives.py` | module-local torch proxies: startup timestamps, checkpoint host barrier, signal safe-globals, upstream exit policy | torch; real-upstream rounds need `MEGATRON_LM_PATH`, two-rank MUSA round is opt-in |
-| `test_torch_cuda.py` | the compatibility layer and the torchada contract | stubs run anywhere; real contracts need MUSA |
-| `test_megatron_integration.py` | a real Megatron: every patch resolves to applied/skipped, patched `FusedLayerNorm` matches `torch.nn.functional.layer_norm`, `get_device_arch_version() == 8`, `fused_kernels.load` is a no-op | Megatron + MUSA, opt-in |
+The launcher defaults to a unique temporary output directory and prints it.
+An explicit `OUTPUT_DIR` must be new or empty; relative paths resolve from the
+calling directory. Existing outputs are never deleted. This smoke saves neither
+optimizer nor RNG state and does not validate full state restoration.
 
-Notes for writing tests:
+For original upstream tests/training, wheel-only validation and actual ms-swift
+workflows, follow [AGENTS.md](AGENTS.md#6-分层验证记录执行了什么而不是只记录退出码).
+Record actual pass/fail/skip counts and missing resources; do not weaken upstream
+assertions or add MUSA skips to conceal failures.
 
-* `conftest.py` exposes a fresh `Engine()` fixture, so engine tests never touch
-  the process-wide registry, plus `fake_package` (writes a throw-away importable
-  module) and `stub_module` (injects a synthetic module into `sys.modules`).
-* `test_megatron_integration.py` **must** run in a subprocess. The patch set is
-  process-global; running it in-process would make results order-dependent.
-* When you find a gap in a delegate, add a test rather than an override. The
-  `test_torchada_*` functions are the contract we rely on but do not implement.
+## 8. Design boundaries
 
-End-to-end check on hardware:
+Keep one patch engine and one ledger. Avoid upstream file copies, source
+rewriting, `.pth`/`sitecustomize` activation and broad module scans. Scoped
+attribute replacement fits the current requirements without adding another
+wrapper framework. Add abstraction when concrete shared behavior justifies it.
 
-```bash
-MEGATRON_LM_PATH=/path/to/Megatron-LM NPUS=2 \
-    PYTHON=/path/to/venv/bin/python bash examples/run_pretrain_smoke.sh
-```
+Megatron is intentionally an environment dependency: callers may use a pinned
+checkout or a Core wheel. Runtime metadata is advisory; record the actual import
+path and revision because namespace packages can combine multiple installations.
 
-A healthy run finishes 5 iterations with finite loss, saves a `torch_dist`
-checkpoint, and exits without MCCL errors or hangs. A tiny mock run need not have
-monotonically decreasing loss. The script recreates `OUTPUT_DIR` and disables
-optimizer/RNG saving; use a scratch directory, and validate full save/resume
-separately when a change affects checkpoint semantics.
+## 9. Diagnostics
 
-### Acceptance beyond this repository's tests
+Inspect `report()` for `pending`, `applied`, `skipped`, `failed` and `detail`.
+Pending before target import is normal. An empty report means no records are
+registered in that process, for example because activation is disabled; it does
+not by itself diagnose missing entry-point metadata.
 
-Run applicable checks in separate processes: package regressions; original
-Megatron-LM unit tests via its distributed pytest entry; original training
-scripts; and an actual ms-swift Megatron-Core workflow. Also verify a wheel-only
-environment with the Megatron-LM checkout absent from `PYTHONPATH` and the working
-directory. The [agent runbook](AGENTS.md) gives commands and reporting criteria.
+Use `MEGATRON_MUSA_PATCH_DEBUG=1` for logging, `ONLY`/`DISABLE` to isolate records,
+and a new process with `MEGATRON_MUSA_PATCH=0` for a disabled baseline. `ONLY`
+takes precedence. `PatchTargetMissing` indicates symbol drift; `PatchConflict`
+indicates an ownership/cleanup conflict. Explicit `apply()` is a diagnostic
+channel and does not validate the caller's automatic activation path.
 
-Do not modify upstream `conftest.py`, add MUSA skips/xfails, relax assertions, or
-replace original tests with local equivalents. Record collected/pass/fail/skip
-counts and reasons: an exit code of zero with no tests executed is not success.
-Use resource and dataset settings required by the original tests; inability to
-run a case remains an explicit validation gap. Test autoload without importing
-this package in the caller; `apply()`-based diagnostics test a different channel.
+## 10. Branches and releases
 
----
-
-## 8. Design decisions and rejected alternatives
-
-| Rejected | Why |
-|---|---|
-| Vendoring whole upstream files (the previous `musa_patch/` approach) | 67 files / 12.8k lines / 32 copied classes drift silently, need `for k in sys.modules: setattr(...)` sweeps, and leave no inventory of what changed. |
-| `unittest.mock` / `pytest.monkeypatch` | They destroy `__name__`, `__signature__` and `__wrapped__`, objects leak into `isinstance` checks, and they are not reversible in production. |
-| AST / `SourceLoader` rewriting | Powerful, and the only way to change a base class at definition site — but the transformed code is cached into the normal `__pycache__`, poisoning every later process on the machine unless you implement pytest-style tagged pyc paths. Not worth it for patches that are all attribute assignments. |
-| A `.pth` file for auto-activation | Costs every interpreter in the environment; failure modes are a traceback per process (or silently ignored lines); `python -S` bypasses it. The `torch.backends` entry point fires early enough and is opt-out-able. |
-| `sitecustomize.py` | Hijacks an admin-owned namespace, collides with other packages, swallows its own errors. |
-| `wrapt` | Excellent library, but this patch set needs ~10 wrappers and its bookkeeping (handles for `unapply`, identity for idempotency) is a dozen lines we already have. One fewer dependency on the activation path. Revisit if wrapper chains ever get deep. |
-| Declaring Megatron as an install dependency | `megatron-core` on PyPI ships only `megatron/core/`, but four patches target `megatron.training` / `megatron.legacy`, which the wheel does not contain. There is no `megatron-lm` on PyPI. The real workflow wants a source checkout pinned to a tag, which pip cannot express — and since `megatron` is a namespace package a pip-installed copy is *merged* with the checkout rather than replacing it, decided by `sys.path` order. The version contract is enforced at runtime against what is actually importable instead (`_compat.check_version`, `check_megatron_present`). |
-| Writing our own `torch.cuda` alias layer | It existed, it was 432 lines, and it scored *worse* than torchada on coverage. Maintaining a second-rate copy of a vendor package is not a good use of anyone's time. |
-| Swapping `sys.modules["torch.cuda"] = torch.musa` | The namespaces differ (`torch.cuda.memory` vs `torch.musa.core.memory`, `nccl` vs `mccl`, ...). Submodule imports and anything holding a reference to the original module break. |
-| Re-implementing what torchada already does | Duplicated code that will rot at a different rate than the thing it duplicates. Assert it in tests instead. |
-
----
-
-## 9. Debugging
-
-```bash
-# What landed, what was skipped, and why
-python -c "import megatron_musa_patch as m, json; print(json.dumps(m.report(), indent=2))"
-
-# Watch patches land, with the trigger that fired them
-MEGATRON_MUSA_PATCH_DEBUG=1 python -c "import megatron_musa_patch as m; m.apply()"
-
-# Isolate one patch
-MEGATRON_MUSA_PATCH_DISABLE=megatron.dist-ckpt.no-fork-writer python train.py
-
-# Or the whole package
-MEGATRON_MUSA_PATCH=0 python train.py
-```
-
-Useful invariants when investigating a report:
-
-* `pending` before target imports is normal for lazy activation. After a
-  successful `apply()` it requires investigation: inspect import errors,
-  unresolved modules and the affected record's `detail`.
-* `skipped` means either the environment disabled it (`detail` says so), the
-  module is not installed, or the `replace` callable declined.
-* Empty `report()` means the package never installed — check
-  `MEGATRON_MUSA_PATCH=0` and the entry point registration.
-
----
-
-## 10. Branching and releases
-
-`v0.16.1-dev` is the development branch for Megatron-LM `core_v0.16.1`. A new
-upstream release gets a **new branch** (`vX.Y.Z-dev`) rather than a breaking
-change on this one.
-
-The package version tracks the upstream release, so `pyproject.toml` is the only
-place a version literal appears (`__version__` reads it back from the installed
-metadata):
-
-| version | when |
-|---|---|
-| `0.16.1.dev0` | on `v0.16.1-dev` |
-| `0.16.1` | a release cut from it |
-| `0.16.1.post1` | a fix on top of that release |
-| `0.16.2.dev0` | new branch `v0.16.2-dev` |
-
-When bumping the target upstream version, also update
-`SUPPORTED_VERSION_SPEC` and `_in_supported_range()` in `_compat.py`, the reference
-environment and actual validation results in both READMEs, and expect
-`test_ledger.py` / the integration test to point at whatever
-moved.
-
----
+The `v0.16.1-dev` branch targets `core_v0.16.1`; package version lives only in
+`pyproject.toml` and is read from installed metadata. Use `0.16.1.dev0` for
+development, `0.16.1` for the release, and `0.16.1.post1` for a follow-up fix.
+Start a new branch for a new upstream release. Review `SUPPORTED_VERSION_SPEC`,
+`_in_supported_range()`, capability probes and each ledger removal condition;
+update the READMEs with actual validation evidence.
 
 ## 11. Contributor checklist
 
-Before opening a change:
-
-Apply code/runtime checks to the affected behaviour. Documentation-only changes
-need link, command-syntax and source-consistency checks, not a training run.
-
-- [ ] No upstream file was copied into this repository.
-- [ ] Upstream tests, assertions, training scripts and framework callers remain
-      unchanged; the original failing entry point was rerun with autoload.
-- [ ] Core compatibility does not depend on `megatron.training` or framework-side
-      MUSA branches; wheel-only coverage and any unavailable checks are recorded.
-- [ ] The patch works regardless of import order, and is exercised before
-      Megatron uses CUDA APIs (test with `import megatron` before and after
-      `import megatron_musa_patch`).
-- [ ] `rationale`, `strategy`, `upstream` and `remove_when` are filled in and
-      specific.
-- [ ] `patches/` still imports cleanly without `torch` on the path.
-- [ ] New behaviour is behind an `_env` switch if a user might reasonably want
-      the upstream behaviour back.
-- [ ] For code changes, `python -m pytest -q` passes, including applicable
-      `MEGATRON_LM_PATH=... python -m pytest tests -q` coverage.
-- [ ] If hardware was available: `examples/run_pretrain_smoke.sh` exits 0 with
-      zero MCCL errors.
-- [ ] Both `README.md` and `README_zh.md` are updated if a user-visible
-      behaviour, flag or switch changed.
-- [ ] Applicable acceptance commands, revisions, pass/fail/skip counts, fallback
-      trade-offs and unresolved gaps are recorded; workflow changes also update
-      both contributor guides and `AGENTS.md`.
-
-### Version-gate maintenance contract
-
-Both `AttrPatch` and `HookPatch` accept `version_gates=("transformer_engine >=2.0,<2.1",)`.
-Comparisons within a string and gates within the tuple are AND-ed; an empty tuple imposes no restriction.
-The three TE norm patches currently declare this range. A range describes patch applicability,
-**not evidence that the vendor implementation outside the range is fixed**.
-
-- Gates read distribution metadata without importing packages. Names are case-insensitive;
-  hyphens, underscores and dots are equivalent.
-- Supported operators: `>=`, `>`, `<=`, `<`, `==`, `!=`. Bounds must be dotted integers.
-  Numeric release tuples are zero-padded, so `2.0 == 2.0.0`. Installed rc/dev/post/local
-  suffixes do not affect ordering: `2.0rc1` and `2.0+vendor` count as `2.0`.
-  This is not full PEP 440; epochs, wildcards and `~=` are unsupported.
-- Missing metadata leaves target resolution/capability checks in charge; it is not a verified match.
-  Unrecognized installed versions block. Reports retain the declaration in `version_gates` and
-  explain blocked gates in the skipped record's `detail`. On first application, if every patch
-  on a target is excluded, the engine does not resolve a potentially removed upstream symbol.
-- `MEGATRON_MUSA_PATCH_IGNORE_VERSION_GATES=1` (also `true` or `*`) bypasses all version gates;
-  `=transformer_engine,transformers` bypasses only those packages; `0/false/off` bypasses none.
-  ONLY/DISABLE, companion requirements and source/capability probes still apply.
-  Set switches before activation. Changing them does not undo existing wrappers or rerun hooks;
-  use a fresh process, or unapply/install for this package's reversible changes.
-
-Source markers are build fingerprints, not correctness proofs. Probing does not execute modules:
-missing packages/files return False, unsupported layouts return None. Current callers keep their
-workarounds on None and decline on False; even a formatting change may remove a marker, so upgrades
-still require original import and numerical regression tests. The MoE topk probe uses deterministic
-input and checks the result without consuming training RNG. To verify an upstream fix, disable the
-patch and rerun its original regression; IGNORE_VERSION_GATES instead trials an out-of-range patch.
-
-Declarations share constructor validation. Only parsing is cached, never environment or metadata.
-Tests must control metadata instead of depending on the installed Transformers version, and use
-the engine fixture to clean up watchers. Run test_version_gates.py, engine lifecycle/dependency
-tests and the full regression suite for engine changes.
+- Changes stay in this repository and preserve pre-existing work.
+- Contracts, selection, ownership and failure paths have relevant regressions.
+- Static checks and applicable tests pass; unexecuted acceptance paths are named.
+- Source and bilingual documentation agree; ledger removal conditions are testable.
+- `git diff --check` passes; artifacts, checkpoints and copied upstream files are
+  excluded from the change. Report revisions, commands, results and limitations.

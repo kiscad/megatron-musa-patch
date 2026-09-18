@@ -21,7 +21,7 @@ MEGATRON_LM_PATH="${MEGATRON_LM_PATH:?set MEGATRON_LM_PATH to a Megatron-LM chec
 PYTHON="${PYTHON:-python}"
 NPUS="${NPUS:-2}"
 TRAIN_ITERS="${TRAIN_ITERS:-5}"
-OUTPUT_DIR="${OUTPUT_DIR:-$(pwd)/musa-smoke-output}"
+OUTPUT_DIR="${OUTPUT_DIR:-$(mktemp -d "${TMPDIR:-/tmp}/megatron-musa-smoke.XXXXXX")}"
 
 ROPE_ARGS=(--no-rope-fusion)
 if [ "${ROPE_FUSION:-0}" = "1" ]; then
@@ -31,8 +31,15 @@ fi
 export CUDA_DEVICE_MAX_CONNECTIONS=1
 export PYTHONPATH="${MEGATRON_LM_PATH}${PYTHONPATH:+:${PYTHONPATH}}"
 
-rm -rf "${OUTPUT_DIR}"
-mkdir -p "${OUTPUT_DIR}"
+# Never delete an existing run. Resolve relative paths before changing into
+# the upstream checkout, so checkpoints land where the caller requested.
+if [[ -d "$OUTPUT_DIR" ]] && [[ -n "$(find "$OUTPUT_DIR" -mindepth 1 -maxdepth 1 -print -quit)" ]]; then
+    echo "ERROR: OUTPUT_DIR must be new or empty: $OUTPUT_DIR" >&2
+    exit 1
+fi
+mkdir -p -- "$OUTPUT_DIR"
+OUTPUT_DIR="$(cd -- "$OUTPUT_DIR" && pwd)"
+echo "Smoke output: $OUTPUT_DIR"
 
 cd "${MEGATRON_LM_PATH}"
 

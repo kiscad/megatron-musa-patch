@@ -403,3 +403,22 @@ def test_reload_retires_declined_patch_and_repairs_old_consumers(engine, fake_pa
     assert not engine._bindings
     engine.unapply()
     assert consumer.fn is module.fn
+
+
+@pytest.mark.parametrize("action", ["reload", "register"])
+def test_late_aliases_follow_rebuilt_chain(engine, fake_package, stub_module, action):
+    name = fake_package("late_alias_target", "def fn(): return 'base'\n")
+    engine.register([AttrPatch("first", f"{name}:fn", _wrap("1"))])
+    engine.apply_now()
+    module = sys.modules[name]
+    late = stub_module("megatron.late_alias", fn=module.fn)
+    foreign = stub_module("megatron.foreign_alias", fn=lambda: "foreign")
+    if action == "reload":
+        importlib.reload(module)
+    else:
+        engine.register([AttrPatch("second", f"{name}:fn", _wrap("2"))])
+    assert late.fn is module.fn
+    assert foreign.fn() == "foreign"
+    engine.unapply()
+    assert late.fn is module.fn
+    assert late.fn() == "base"

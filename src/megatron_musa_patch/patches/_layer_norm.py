@@ -17,6 +17,7 @@ from typing import Any
 
 from .. import _env
 from .._engine import AttrPatch
+from ..backends import musa_available as _musa_live
 
 __all__ = ["PATCHES"]
 
@@ -247,14 +248,6 @@ def _unfused_te_layer_norm_linear(original: Any) -> Any:
     _BASE_NORM_LINEAR = TELayerNormColumnParallelLinear
 
     return TELayerNormColumnParallelLinear
-
-
-def _musa_live() -> bool:
-    import torch
-
-    musa = getattr(torch, "musa", None)
-    available = getattr(musa, "is_available", None)
-    return callable(available) and bool(available())
 
 
 def _te_norm_unfused(original: Any) -> Any:

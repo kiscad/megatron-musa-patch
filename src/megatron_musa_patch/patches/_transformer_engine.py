@@ -374,8 +374,10 @@ def _install_mem_monitor_shim() -> bool:
     import types
 
     if "musa_patch" in sys.modules or "musa_patch.mem_utils" in sys.modules:
-        # A real musa_patch (or another owner) is importable: never shadow it.
+        # A real musa_patch (or another owner) is loaded: never shadow it.
         return False
+    if _compat.find_spec_without_watchers("musa_patch") is not None:
+        return False  # Respect installed packages without executing their imports.
     if not _te_fork_needs_mem_monitor():
         return False
 

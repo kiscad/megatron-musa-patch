@@ -217,3 +217,24 @@ def test_topk_capability_probe_preserves_rng(monkeypatch, broken):
     state = torch.get_rng_state().clone()
     assert _moe._fp64_topk_works_on_musa() is (not broken)
     assert torch.equal(torch.get_rng_state(), state)
+
+
+def test_fp64_topk_preserves_named_result():
+    scores = torch.tensor([0.1, 0.3, 0.2], dtype=torch.float64)
+    result = _moe._fp64_topk(torch, scores, 2, None, True, True)
+    assert isinstance(result, torch.return_types.topk)
+    torch.testing.assert_close(result.values, torch.tensor([0.3, 0.2], dtype=torch.float64))
+    assert result.indices.tolist() == [1, 2]
+
+
+def test_fp64_musa_out_is_delegated(monkeypatch):
+    from unittest.mock import Mock
+
+    native = Mock(return_value=object())
+    namespace = SimpleNamespace(float64=torch.float64, topk=native)
+    scores = SimpleNamespace(dtype=torch.float64, device=SimpleNamespace(type="musa"))
+    outputs = (object(), object())
+    monkeypatch.setattr(_moe, "_musa_live", lambda: True)
+    result = _moe._MoeTorchProxy(namespace).topk(scores, 2, out=outputs)
+    native.assert_called_once_with(scores, 2, dim=None, largest=True, sorted=True, out=outputs)
+    assert result is native.return_value
