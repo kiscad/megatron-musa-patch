@@ -17,6 +17,8 @@
 | `megatron.fusions.fused-layer-norm.have-apex-flag` | `fused_layer_norm:HAVE_FUSED_LAYER_NORM` | 消费方按该 flag 分支；类被替换后保持其语义为真 |
 | `megatron.fusions.persist-layer-norm.disable` | `fused_layer_norm:HAVE_PERSIST_LAYER_NORM` | 回退实现不会执行 apex 的 persistent kernel |
 | `megatron.transformer-block.layer-norm.impl-local` | `transformer_block:LayerNormImpl` | 受影响的 MUSA 栈上 TE 的 norm 算子在 `allocateSpace` 处 abort，即使是 `local` spec |
+| `transformer_engine.layer-norm-linear.native-unfused` | `transformer_engine:LayerNormLinear` | 直接 TE 模型（megatron-FSDP 套件中的 te.pytorch.TransformerLayer）经 module/_common.py:apply_normalization 归一化，在 MUSA allocateSpace 断言中止。子类化 TE 模块，仅对符合条件的普通路径（无 FP8、无 UB overlap、无 offload、tp_size 1、不返回 layernorm 输出）改走函数式 norm + F.linear，保留参数、isinstance 与 checkpoint 契约。 |
+| `transformer_engine.layer-norm-mlp.native-unfused` | `transformer_engine:LayerNormMLP` | MLP block 同一融合 norm 故障；符合条件的普通路径为函数式 norm -> fc1 -> gelu(tanh)/relu -> fc2，全部走普通 PyTorch 算子。门控激活与非普通配置保留原始 forward。 |
 | `megatron.te.layer-norm-linear.unfused` | `transformer_engine:TELayerNormColumnParallelLinear` | 仅对 LayerNorm 用 PyTorch norm + TE Linear 绕过 QKV/FC1 内融合 norm 的 `allocateSpace` 错误，保留 FP8 Linear 和 norm checkpoint 参数名。norm 步骤遵循 TE 的 op 契约——以 autocast dtype 或 norm 权重 dtype 计算并把输入 cast 到该 dtype，和原生内核一样吸收混合 dtype 激活（如 bf16 模型中 fp32 学习位置嵌入之和） |
 | `megatron.te.cpu-offload-context.signature-dispatch` | `transformer_engine:get_cpu_offload_context` | 每次构建 `TransformerBlock` 都会调用 TE 的 CPU-offload helper；当 fork 报告的版本号与真实签名不一致时会选中六参数（TE ≥ 2.5）调用而 fork 只接受五参数，模型还没建好就报错；改为按已安装函数自身的签名分发 |
 | `megatron.fsdp.premul-sum.device-prescale` | `fsdp...param_and_grad_buffer:gradient_reduce_preprocessing` | torch_musa/MCCL 没有实现 PREMUL_SUM；FSDP 梯度平均在该分支设备端 `mul_` 预缩放后改用 SUM，其余分支透传 |
