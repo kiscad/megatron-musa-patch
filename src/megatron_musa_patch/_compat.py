@@ -209,8 +209,10 @@ def split_target(target: str) -> tuple[str, str]:
         module, _, attr = target.partition(":")
     else:
         module, _, attr = target.rpartition(".")
-    if not module or not attr or not all(
-        part.isidentifier() for part in (module + "." + attr).split(".")
+    if (
+        not module
+        or not attr
+        or not all(part.isidentifier() for part in (module + "." + attr).split("."))
     ):
         raise ValueError(f"malformed patch target: {target!r}")
     return module, attr
@@ -292,11 +294,13 @@ def module_source_contains(module_name: str, *markers: str) -> bool | None:
     if target.is_dir():
         target = target / "__init__.py"
     elif not target.exists():
-        target = target.with_name(target.name + ".py") if not target.name.endswith(".py") else target
+        target = (
+            target.with_name(target.name + ".py") if not target.name.endswith(".py") else target
+        )
     if not target.exists():
         return False  # submodule file genuinely absent
     try:
-        with open(target, "r", encoding="utf-8", errors="replace") as handle:
+        with open(target, encoding="utf-8", errors="replace") as handle:
             source = handle.read()
     except OSError:
         return None

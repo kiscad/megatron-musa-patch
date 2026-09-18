@@ -119,11 +119,7 @@ class _SubgroupsDistributedProxy:
         if backend is None and len(args) >= 3:  # (ranks, timeout, backend, ...)
             positional = 2
             backend = args[2]
-        if (
-            isinstance(backend, str)
-            and backend.lower() == "nccl"
-            and _musa_live()
-        ):
+        if isinstance(backend, str) and backend.lower() == "nccl" and _musa_live():
             backend = "mccl"
             if positional is not None:
                 args = args[:positional] + (backend,) + args[positional + 1 :]

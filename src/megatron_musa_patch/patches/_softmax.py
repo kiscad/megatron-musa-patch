@@ -39,10 +39,7 @@ def _softmax_kernel_available(original: Any) -> Any:
 PATCHES = (
     AttrPatch(
         id="megatron.softmax.kernel-availability.musa",
-        target=(
-            "megatron.core.fusions.fused_softmax:FusedScaleMaskSoftmax."
-            "is_kernel_available"
-        ),
+        target=("megatron.core.fusions.fused_softmax:FusedScaleMaskSoftmax." "is_kernel_available"),
         replace=_softmax_kernel_available,
         rationale=(
             "Upcycling with the local spec constructs FusedScaleMaskSoftmax; its "

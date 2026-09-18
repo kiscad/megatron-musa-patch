@@ -4,6 +4,7 @@ The unit rounds are torch-free: ``_rope`` imports torch/apex only inside the
 ``replace`` callables, and everything below runs against synthetic modules.
 The real kernels are exercised by ``rope_smoke.py`` on a MUSA stack.
 """
+
 from __future__ import annotations
 
 import sys
@@ -32,8 +33,11 @@ def _stub_apex(stub_module):
     """Make ``_rope._apex_kernels()`` resolve without a real apex install."""
     stub_module("fused_rotary_positional_embedding")
     bshd, thd = Recorder("bshd-result"), Recorder("thd-result")
-    stub_module("apex.transformer.functional",
-                fused_apply_rotary_pos_emb=bshd, fused_apply_rotary_pos_emb_thd=thd)
+    stub_module(
+        "apex.transformer.functional",
+        fused_apply_rotary_pos_emb=bshd,
+        fused_apply_rotary_pos_emb_thd=thd,
+    )
     return bshd, thd
 
 
@@ -56,6 +60,7 @@ def _no_stale_warnings():
 
 # --- kernel selection -----------------------------------------------------
 
+
 def test_apex_pair_is_installed_where_upstream_has_none(engine, stub_module):
     apex_bshd, apex_thd = _stub_apex(stub_module)
     module = _rope_utils(stub_module)
@@ -70,12 +75,17 @@ def test_apex_pair_is_installed_where_upstream_has_none(engine, stub_module):
     sentinel_t, sentinel_freqs = object(), object()
     assert module.fused_apply_rotary_pos_emb(sentinel_t, sentinel_freqs) == "bshd-result"
     assert apex_bshd.calls == [((sentinel_t, sentinel_freqs, False), {})]
-    assert module.fused_apply_rotary_pos_emb(sentinel_t, sentinel_freqs,
-                                             transpose_output_memory=True) == "bshd-result"
+    assert (
+        module.fused_apply_rotary_pos_emb(sentinel_t, sentinel_freqs, transpose_output_memory=True)
+        == "bshd-result"
+    )
     assert apex_bshd.calls[-1] == ((sentinel_t, sentinel_freqs, True), {})
 
     cu_seqlens = object()
-    assert module.fused_apply_rotary_pos_emb_thd(sentinel_t, cu_seqlens, sentinel_freqs) == "thd-result"
+    assert (
+        module.fused_apply_rotary_pos_emb_thd(sentinel_t, cu_seqlens, sentinel_freqs)
+        == "thd-result"
+    )
     assert apex_thd.calls == [((sentinel_t, cu_seqlens, sentinel_freqs), {})]
 
 
@@ -112,7 +122,9 @@ def test_transformer_engine_kernels_are_never_replaced(engine, stub_module):
     assert module.fused_apply_rotary_pos_emb_thd is te_thd
 
 
-def test_kernel_patches_decline_when_no_apex_kernels_are_available(engine, stub_module, monkeypatch):
+def test_kernel_patches_decline_when_no_apex_kernels_are_available(
+    engine, stub_module, monkeypatch
+):
     monkeypatch.setattr(_rope, "_apex_kernels", lambda: None)
     module = _rope_utils(stub_module)
 
@@ -142,6 +154,7 @@ def test_rope_fusion_switch_declines(stub_module, monkeypatch):
 
 # --- unfused demotion -----------------------------------------------------
 
+
 def _dispatcher(engine, stub_module, *, calls, bshd=None, thd=None):
     """Install the fallback trio and return (module, config)."""
     _stub_apex(stub_module)
@@ -162,8 +175,8 @@ def test_interleaved_configs_are_demoted_and_the_flag_is_restored(engine, stub_m
     config = SimpleNamespace(apply_rope_fusion=True, rotary_interleaved=True)
 
     assert module.apply_rotary_pos_emb(object(), object(), config=config) == "unfused-result"
-    assert calls == [False]          # upstream's unfused branch was selected
-    assert config.apply_rope_fusion is True   # ... and the config is untouched afterwards
+    assert calls == [False]  # upstream's unfused branch was selected
+    assert config.apply_rope_fusion is True  # ... and the config is untouched afterwards
 
 
 def test_fusible_calls_stay_on_the_fused_path(engine, stub_module):
@@ -201,8 +214,9 @@ def test_packed_sequences_demote_only_under_context_parallel(
     config = SimpleNamespace(apply_rope_fusion=True, rotary_interleaved=False)
     cp_group = SimpleNamespace(size=lambda: cp_size, rank=lambda: 0)
 
-    module.apply_rotary_pos_emb(object(), object(), config=config,
-                                cu_seqlens=object(), cp_group=cp_group)
+    module.apply_rotary_pos_emb(
+        object(), object(), config=config, cu_seqlens=object(), cp_group=cp_group
+    )
     assert calls == expected
 
 
@@ -230,6 +244,7 @@ def test_unfused_route_passes_through_without_apex_kernels(engine, stub_module, 
 
 
 # --- hardware round --------------------------------------------------------
+
 
 @pytest.mark.integration
 def test_musa_fused_rope_parity():
@@ -260,9 +275,7 @@ def test_musa_fused_rope_parity():
 
 @pytest.mark.parametrize("packed", [False, True])
 @pytest.mark.parametrize("supports_interleaved", [False, True])
-def test_native_te_interleaved_version_guard(
-    engine, stub_module, packed, supports_interleaved
-):
+def test_native_te_interleaved_version_guard(engine, stub_module, packed, supports_interleaved):
     calls = []
     bshd, thd = Recorder("te-bshd"), Recorder("te-thd")
     extension = stub_module("megatron.core.extensions.transformer_engine")

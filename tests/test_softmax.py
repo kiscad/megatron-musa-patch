@@ -1,5 +1,4 @@
 """Fused-softmax availability: extension probe and torch fallback contract."""
-from types import SimpleNamespace
 
 import pytest
 
@@ -9,8 +8,7 @@ torch = pytest.importorskip("torch")
 
 
 def _patch():
-    return next(p for p in _softmax.PATCHES
-                if p.id == "megatron.softmax.kernel-availability.musa")
+    return next(p for p in _softmax.PATCHES if p.id == "megatron.softmax.kernel-availability.musa")
 
 
 class _Softmax:
@@ -25,10 +23,12 @@ class _Softmax:
 def test_kernel_available_returns_false_without_extension(monkeypatch):
     import importlib.util
 
-    monkeypatch.setattr(importlib.util, "find_spec",
-                        lambda name: None if name == "scaled_masked_softmax_cuda"
-                        else object())
-    original = Mock_probe = lambda self, mask, b, np, sq, sk: pytest.fail(
+    monkeypatch.setattr(
+        importlib.util,
+        "find_spec",
+        lambda name: None if name == "scaled_masked_softmax_cuda" else object(),
+    )
+    Mock_probe = lambda self, mask, b, np, sq, sk: pytest.fail(  # noqa: E731
         "must not reach the CUDA probe when the extension is absent"
     )
     wrapped = _patch().replace(Mock_probe)

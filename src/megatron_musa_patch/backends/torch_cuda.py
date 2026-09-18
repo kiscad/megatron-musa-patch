@@ -25,7 +25,6 @@ import functools
 import logging
 import sys
 from threading import RLock
-
 from typing import Any
 
 from .. import _compat
@@ -96,9 +95,13 @@ def _refresh_transformers_device_constants() -> None:
         return
     refreshed = False
     names = (
-        "is_torch_cuda_available", "is_torch_bf16_gpu_available",
-        "is_torch_fp16_available_on_device", "is_torch_bf16_available_on_device",
-        "is_torch_tf32_available", "is_flash_attn_2_available", "is_flash_attn_3_available",
+        "is_torch_cuda_available",
+        "is_torch_bf16_gpu_available",
+        "is_torch_fp16_available_on_device",
+        "is_torch_bf16_available_on_device",
+        "is_torch_tf32_available",
+        "is_flash_attn_2_available",
+        "is_flash_attn_3_available",
     )
     for name in names:
         fn = vars(module).get(name)
@@ -113,7 +116,8 @@ def _refresh_transformers_device_constants() -> None:
         # re-check it when transformers changes how it freezes probes.
         logger.debug(
             "transformers device-availability caches refreshed (transformers %s)",
-            _compat.transformers_version())
+            _compat.transformers_version(),
+        )
 
 
 def _alias_availability(torch: Any, musa: Any) -> None:
@@ -177,9 +181,7 @@ def _fix_tensor_musa_for_subclasses(torch: Any) -> None:
         device = _resolve_musa_device(device)
         if device.type != "musa":
             raise RuntimeError(f"Invalid device, must be musa device: {device}")
-        return self.to(
-            device=device, non_blocking=non_blocking, memory_format=memory_format
-        )
+        return self.to(device=device, non_blocking=non_blocking, memory_format=memory_format)
 
     @functools.wraps(original_musa)
     def _musa(self, *args, **kwargs):

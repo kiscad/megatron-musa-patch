@@ -156,5 +156,6 @@ def version_gate_overrides() -> frozenset[str]:
         return frozenset()
     if raw in _TRUTHY:
         return frozenset({"*"})
-    return frozenset(normalize_distribution_name(part.strip())
-                     for part in raw.split(",") if part.strip())
+    return frozenset(
+        normalize_distribution_name(part.strip()) for part in raw.split(",") if part.strip()
+    )

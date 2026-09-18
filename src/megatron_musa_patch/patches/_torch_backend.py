@@ -18,11 +18,12 @@ from ..backends import torch_cuda
 __all__ = ["PATCHES"]
 
 
-def _install_torch_cuda_compat() -> bool | None:
+def _install_torch_cuda_compat() -> bool:
     # Do not acquire undo ownership of a layer installed by another caller.
     if torch_cuda.is_applied():
         return False
     torch_cuda.apply()
+    return True
 
 
 PATCHES = (

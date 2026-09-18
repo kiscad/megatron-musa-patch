@@ -47,7 +47,9 @@ def test_forward_backward_matches_reference(norm_class, normalization, zero_cent
         reference = torch.nn.functional.layer_norm(reference_x, shape, gamma, reference_bias, 1e-5)
     else:
         dimensions = tuple(range(-len(shape), 0))
-        reference = reference_x * torch.rsqrt(reference_x.square().mean(dimensions, keepdim=True) + 1e-5)
+        reference = reference_x * torch.rsqrt(
+            reference_x.square().mean(dimensions, keepdim=True) + 1e-5
+        )
         reference = reference * gamma
     output = norm(x)
     torch.testing.assert_close(output, reference)
@@ -130,9 +132,15 @@ def test_availability_flags_require_installed_fallback(stub_module, norm_class, 
 
 def test_layer_norm_te_patches_declare_te_version_gates():
     """The three TE-abort fallbacks carry the declarative 2.0.x gate."""
-    gated = {p.id: p.version_gates for p in _layer_norm.PATCHES
-             if p.id in ("megatron.te.layer-norm-linear.unfused",
-                         "megatron.transformer-block.layer-norm.impl-local",
-                         "megatron.te.norm.unfused-musa")}
+    gated = {
+        p.id: p.version_gates
+        for p in _layer_norm.PATCHES
+        if p.id
+        in (
+            "megatron.te.layer-norm-linear.unfused",
+            "megatron.transformer-block.layer-norm.impl-local",
+            "megatron.te.norm.unfused-musa",
+        )
+    }
     assert len(gated) == 3
     assert all(g == ("transformer_engine >=2.0,<2.1",) for g in gated.values())

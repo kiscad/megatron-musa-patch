@@ -38,7 +38,7 @@ def _install_dcp_device() -> bool:
 
     torch = sys.modules.get("torch")
     musa = getattr(torch, "musa", None)
-    if _dcp_device_owned is not None or musa is None or not musa.is_available():
+    if _dcp_device_owned is not None or torch is None or musa is None or not musa.is_available():
         return False
     filesystem = importlib.import_module("torch.distributed.checkpoint.filesystem")
     original = getattr(filesystem, "_get_available_device_type", None)
@@ -55,7 +55,7 @@ def _install_dcp_device() -> bool:
             return "musa"
         return device_type
 
-    filesystem._get_available_device_type = actual_device_type
+    filesystem._get_available_device_type = actual_device_type  # type: ignore[attr-defined]
     _dcp_device_owned = (filesystem, original, actual_device_type)
     return True
 
@@ -163,8 +163,10 @@ def _serial_writer(original: Any) -> Any:
                 if isinstance(result, Exception):
                     raise result
                 if not isinstance(result, list):
-                    raise TypeError(f"checkpoint bucket {idx} returned {type(result).__name__}, not list")
-                write_results_or_exc[idx] = result
+                    raise TypeError(
+                        f"checkpoint bucket {idx} returned {type(result).__name__}, not list"
+                    )
+                write_results_or_exc[idx] = result  # type: ignore[index]
             except Exception as exc:  # noqa: BLE001 - report upstream's failure payload
                 logger.error("megatron-musa-patch: bucket %d failed: %s", local_proc_idx, exc)
                 write_results_or_exc = exc
@@ -223,8 +225,7 @@ PATCHES = (
             "CKPT_FORK=1 restores the original worker launcher."
         ),
         upstream=(
-            "NVIDIA/Megatron-LM megatron/core/dist_checkpointing/strategies/"
-            "filesystem_async.py"
+            "NVIDIA/Megatron-LM megatron/core/dist_checkpointing/strategies/" "filesystem_async.py"
         ),
         remove_when=(
             "Review worker signatures/result protocol and async_utils on every "

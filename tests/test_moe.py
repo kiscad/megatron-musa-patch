@@ -1,4 +1,5 @@
 """Module-local MoE adapters: FP64 top-k reference and namespace forwarding."""
+
 from types import SimpleNamespace
 
 import pytest
@@ -20,8 +21,9 @@ def test_fp64_topk_matches_cpu_reference(dim, largest, sorted_):
     generator = torch.Generator().manual_seed(7)
     scores = torch.rand(8, 6, dtype=torch.float64, generator=generator)
     values, indices = _moe._fp64_topk(torch, scores, 2, dim, largest, sorted_)
-    expected = torch.topk(scores, k=2, dim=1 if dim is None else dim,
-                          largest=largest, sorted=sorted_)
+    expected = torch.topk(
+        scores, k=2, dim=1 if dim is None else dim, largest=largest, sorted=sorted_
+    )
     torch.testing.assert_close(values, expected.values)
     assert torch.equal(indices, expected.indices)
     assert values.dtype == torch.float64
@@ -76,25 +78,35 @@ def test_topk_patch_targets_moe_utils_namespace():
 
 # --- P05: fused permute/unpermute demotion -------------------------------
 
+
 def _permute_env(stub_module, dtype_marker="fp32"):
     calls = []
 
-    def original(tokens, routing_map, probs=None, num_out_tokens=None, fused=False,
-                 drop_and_pad=False):
-        calls.append({"fused": fused, "probs": probs,
-                      "num_out_tokens": num_out_tokens, "drop_and_pad": drop_and_pad})
+    def original(
+        tokens, routing_map, probs=None, num_out_tokens=None, fused=False, drop_and_pad=False
+    ):
+        calls.append(
+            {
+                "fused": fused,
+                "probs": probs,
+                "num_out_tokens": num_out_tokens,
+                "drop_and_pad": drop_and_pad,
+            }
+        )
         return "permuted", None, "indices"
 
     reduce_op = SimpleNamespace(SUM="SUM")
     stub_module(
         "torch",
-        float32="fp32", float64="fp64", float16="fp16", bfloat16="bf16",
+        float32="fp32",
+        float64="fp64",
+        float16="fp16",
+        bfloat16="bf16",
         distributed=SimpleNamespace(ReduceOp=reduce_op),
         musa=SimpleNamespace(is_available=lambda: True),
     )
     stub_module("torch.distributed", ReduceOp=reduce_op)
-    patch = next(p for p in _moe.PATCHES
-                 if p.id == "megatron.moe.permutation.unfused-musa")
+    patch = next(p for p in _moe.PATCHES if p.id == "megatron.moe.permutation.unfused-musa")
     wrapped = patch.replace(original)
 
     class Tensor:
@@ -110,10 +122,12 @@ def _permute_env(stub_module, dtype_marker="fp32"):
 def test_permute_demotes_fused_for_broken_dtypes(stub_module):
     wrapped, calls, Tensor = _permute_env(stub_module)
     routing_map = "map"
-    assert wrapped(Tensor("fp32"), routing_map, fused=True, num_out_tokens=8) == \
-        ("permuted", None, "indices")
-    assert calls[-1] == {"fused": False, "probs": None,
-                         "num_out_tokens": 8, "drop_and_pad": False}
+    assert wrapped(Tensor("fp32"), routing_map, fused=True, num_out_tokens=8) == (
+        "permuted",
+        None,
+        "indices",
+    )
+    assert calls[-1] == {"fused": False, "probs": None, "num_out_tokens": 8, "drop_and_pad": False}
     # float64 is broken as well
     wrapped(Tensor("fp64"), routing_map, fused=True)
     assert calls[-1]["fused"] is False
@@ -130,15 +144,28 @@ def test_permute_demotes_fused_for_broken_dtypes(stub_module):
 def test_unpermute_requires_its_permute_companion(stub_module):
     calls = []
 
-    def original(tokens, sorted_indices, restore_shape, probs=None, routing_map=None,
-                 fused=False, drop_and_pad=False):
+    def original(
+        tokens,
+        sorted_indices,
+        restore_shape,
+        probs=None,
+        routing_map=None,
+        fused=False,
+        drop_and_pad=False,
+    ):
         calls.append(fused)
         return "restored"
 
     reduce_op = SimpleNamespace(SUM="SUM")
-    stub_module("torch", float32="fp32", float64="fp64", float16="fp16",
-                bfloat16="bf16", distributed=SimpleNamespace(ReduceOp=reduce_op),
-                musa=SimpleNamespace(is_available=lambda: True))
+    stub_module(
+        "torch",
+        float32="fp32",
+        float64="fp64",
+        float16="fp16",
+        bfloat16="bf16",
+        distributed=SimpleNamespace(ReduceOp=reduce_op),
+        musa=SimpleNamespace(is_available=lambda: True),
+    )
     stub_module("torch.distributed", ReduceOp=reduce_op)
     patches = {p.id: p for p in _moe.PATCHES}
     unpermute = patches["megatron.moe.unpermutation.unfused-musa"]
@@ -151,7 +178,6 @@ def test_unpermute_requires_its_permute_companion(stub_module):
 
 
 def test_moe_topk_declines_when_fp64_topk_works(monkeypatch):
-    from megatron_musa_patch import _compat
     from megatron_musa_patch.patches import _moe
 
     monkeypatch.setattr(_moe, "_musa_live", lambda: True)
@@ -177,11 +203,16 @@ def test_topk_capability_probe_preserves_rng(monkeypatch, broken):
     # Route the probe's allocation to CPU; this checks probe side effects,
     # independent of whether the installed MUSA kernel supports float64.
     original_arange = torch.arange
-    monkeypatch.setattr(torch, "arange", lambda *args, **kwargs: original_arange(
-        *args, **dict(kwargs, device="cpu")))
+    monkeypatch.setattr(
+        torch,
+        "arange",
+        lambda *args, **kwargs: original_arange(*args, **dict(kwargs, device="cpu")),
+    )
     if broken:
+
         def fail(*args, **kwargs):
             raise RuntimeError("unsupported")
+
         monkeypatch.setattr(torch, "topk", fail)
     state = torch.get_rng_state().clone()
     assert _moe._fp64_topk_works_on_musa() is (not broken)

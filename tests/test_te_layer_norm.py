@@ -1,20 +1,21 @@
 """Norm-linear fallback: gradients, parameter names and upstream opt-out."""
+
 from copy import deepcopy
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
-from megatron_musa_patch.patches import _layer_norm
-
 from conftest import integration_env
 
-torch = pytest.importorskip('torch')
+from megatron_musa_patch.patches import _layer_norm
+
+torch = pytest.importorskip("torch")
 
 
-@pytest.mark.parametrize('zero_centered', [False, True])
-@pytest.mark.parametrize('dtype', [torch.float64, torch.bfloat16])
+@pytest.mark.parametrize("zero_centered", [False, True])
+@pytest.mark.parametrize("dtype", [torch.float64, torch.bfloat16])
 def test_norm_linear_contract(stub_module, monkeypatch, zero_centered, dtype):
-    monkeypatch.delenv('MEGATRON_MUSA_PATCH_TE_FUSED_LAYERNORM', raising=False)
+    monkeypatch.delenv("MEGATRON_MUSA_PATCH_TE_FUSED_LAYERNORM", raising=False)
 
     class Linear(torch.nn.Module):
         def __init__(self, input_size, output_size, *, config, **kwargs):
@@ -28,12 +29,19 @@ def test_norm_linear_contract(stub_module, monkeypatch, zero_centered, dtype):
     def sharded(self, *args, **kwargs):
         return self.state_dict()
 
-    stub_module('megatron.core.extensions.transformer_engine', HAVE_TE=True,
-                TEColumnParallelLinear=Linear)
-    fallback = _layer_norm._unfused_te_layer_norm_linear(SimpleNamespace(sharded_state_dict=sharded))
-    config = SimpleNamespace(normalization="LayerNorm", layernorm_epsilon=1e-5,
-                             layernorm_zero_centered_gamma=zero_centered,
-                             params_dtype=dtype, sequence_parallel=True)
+    stub_module(
+        "megatron.core.extensions.transformer_engine", HAVE_TE=True, TEColumnParallelLinear=Linear
+    )
+    fallback = _layer_norm._unfused_te_layer_norm_linear(
+        SimpleNamespace(sharded_state_dict=sharded)
+    )
+    config = SimpleNamespace(
+        normalization="LayerNorm",
+        layernorm_epsilon=1e-5,
+        layernorm_zero_centered_gamma=zero_centered,
+        params_dtype=dtype,
+        sequence_parallel=True,
+    )
     module = fallback(16, 8, config=config)
     x = torch.randn(4, 16, dtype=dtype, requires_grad=True)
     ref_x = x.detach().double().requires_grad_()
@@ -51,8 +59,8 @@ def test_norm_linear_contract(stub_module, monkeypatch, zero_centered, dtype):
     expected.backward(grad.double())
     torch.testing.assert_close(x.grad.double(), ref_x.grad, **tol)
     torch.testing.assert_close(module.layer_norm_weight.grad.double(), ref_gamma.grad, **tol)
-    keys = {'weight', 'bias', 'layer_norm_weight'}
-    keys.add('layer_norm_bias')
+    keys = {"weight", "bias", "layer_norm_weight"}
+    keys.add("layer_norm_bias")
     torch.testing.assert_close(module.layer_norm_bias.grad.double(), ref_bias.grad, **tol)
     assert set(module.sharded_state_dict()) == keys
     assert module.layer_norm_weight.sequence_parallel
@@ -64,14 +72,14 @@ def test_norm_linear_contract(stub_module, monkeypatch, zero_centered, dtype):
     torch.testing.assert_close(clone(x)[0], actual)
 
 
-@pytest.mark.parametrize('zero_centered', [False, True])
+@pytest.mark.parametrize("zero_centered", [False, True])
 def test_rmsnorm_constructs_original_fused_module(stub_module, monkeypatch, zero_centered):
-    monkeypatch.delenv('MEGATRON_MUSA_PATCH_TE_FUSED_LAYERNORM', raising=False)
+    monkeypatch.delenv("MEGATRON_MUSA_PATCH_TE_FUSED_LAYERNORM", raising=False)
     calls = []
 
     class Linear(torch.nn.Module):
         def __init__(self, *args, **kwargs):
-            raise AssertionError('RMSNorm must not construct the unfused TE Linear')
+            raise AssertionError("RMSNorm must not construct the unfused TE Linear")
 
     class Original(torch.nn.Module):
         def __init__(self, *args, **kwargs):
@@ -84,23 +92,24 @@ def test_rmsnorm_constructs_original_fused_module(stub_module, monkeypatch, zero
         def sharded_state_dict(self):
             return {}
 
-    stub_module('megatron.core.extensions.transformer_engine', HAVE_TE=True,
-                TEColumnParallelLinear=Linear)
+    stub_module(
+        "megatron.core.extensions.transformer_engine", HAVE_TE=True, TEColumnParallelLinear=Linear
+    )
     patched = _layer_norm._unfused_te_layer_norm_linear(Original)
-    config = SimpleNamespace(normalization='RMSNorm', layernorm_zero_centered_gamma=zero_centered)
+    config = SimpleNamespace(normalization="RMSNorm", layernorm_zero_centered_gamma=zero_centered)
     options = dict(config=config, bias=False, skip_bias_add=True, tp_group=object(), stride=3)
     module = patched(16, 8, **options)
     assert type(module) is Original
     assert isinstance(module, patched)
     assert type(module).forward is Original.forward
-    assert not hasattr(module, '_megatron_musa_patch_fallback')
+    assert not hasattr(module, "_megatron_musa_patch_fallback")
     assert calls == [((16, 8), options)]
     x = torch.randn(2, 16)
     assert module(x) is x
 
 
 def test_te_norm_linear_opt_out(monkeypatch):
-    monkeypatch.setenv('MEGATRON_MUSA_PATCH_TE_FUSED_LAYERNORM', '1')
+    monkeypatch.setenv("MEGATRON_MUSA_PATCH_TE_FUSED_LAYERNORM", "1")
     assert _layer_norm._unfused_te_layer_norm_linear(object()) is None
 
 
@@ -113,20 +122,20 @@ def test_te_unavailable_skips_norm_linear_patch(engine, stub_module):
         def sharded_state_dict(self):
             return {}
 
-    assert not hasattr(Original, 'sharded_state_dict')
+    assert not hasattr(Original, "sharded_state_dict")
     module = stub_module(
-        'megatron.core.extensions.transformer_engine', HAVE_TE=False,
+        "megatron.core.extensions.transformer_engine",
+        HAVE_TE=False,
         TELayerNormColumnParallelLinear=Original,
         TEColumnParallelLinear=te.pytorch.Linear,
     )
-    patch = next(p for p in _layer_norm.PATCHES
-                 if p.id == 'megatron.te.layer-norm-linear.unfused')
+    patch = next(p for p in _layer_norm.PATCHES if p.id == "megatron.te.layer-norm-linear.unfused")
     engine.register([patch])
     engine.install()
 
     assert module.TELayerNormColumnParallelLinear is Original
     assert module.HAVE_TE is False
-    assert engine.report()[0]['status'] == 'skipped'
+    assert engine.report()[0]["status"] == "skipped"
 
 
 def _norm_linear_env(stub_module):
@@ -143,16 +152,22 @@ def _norm_linear_env(stub_module):
     def sharded(self, *args, **kwargs):
         return self.state_dict()
 
-    stub_module('megatron.core.extensions.transformer_engine', HAVE_TE=True,
-                TEColumnParallelLinear=Linear)
+    stub_module(
+        "megatron.core.extensions.transformer_engine", HAVE_TE=True, TEColumnParallelLinear=Linear
+    )
     original = SimpleNamespace(sharded_state_dict=sharded)
     return _layer_norm._unfused_te_layer_norm_linear(original), original
 
 
 def _norm_config(normalization):
-    return SimpleNamespace(normalization=normalization, layernorm_epsilon=1e-5,
-                           layernorm_zero_centered_gamma=False, params_dtype=torch.float32,
-                           sequence_parallel=False, add_bias_linear=False)
+    return SimpleNamespace(
+        normalization=normalization,
+        layernorm_epsilon=1e-5,
+        layernorm_zero_centered_gamma=False,
+        params_dtype=torch.float32,
+        sequence_parallel=False,
+        add_bias_linear=False,
+    )
 
 
 def test_subclass_constructs_itself_for_rmsnorm(stub_module):
@@ -169,21 +184,25 @@ def test_subclass_constructs_itself_for_rmsnorm(stub_module):
         def __init__(self, config, tp_comm_buffer_name, *args, **kwargs):
             calls.append((config, tp_comm_buffer_name, args, kwargs))
             super().__init__(
-                input_size=config.hidden_size, output_size=config.hidden_size,
-                config=config, gather_output=False, bias=config.add_bias_linear,
-                skip_bias_add=False, is_expert=False,
+                input_size=config.hidden_size,
+                output_size=config.hidden_size,
+                config=config,
+                gather_output=False,
+                bias=config.add_bias_linear,
+                skip_bias_add=False,
+                is_expert=False,
                 tp_comm_buffer_name=tp_comm_buffer_name,
             )
 
-    config = _norm_config('RMSNorm')
+    config = _norm_config("RMSNorm")
     config.hidden_size = 16
     # Exact call shapes observed from the upstream heterogeneous builds.
-    module = Gathered(config=config, tp_comm_buffer_name='linear_attn')
+    module = Gathered(config=config, tp_comm_buffer_name="linear_attn")
     assert type(module) is Gathered
     assert isinstance(module, patched)
-    module = Gathered(config=config, tp_comm_buffer_name='linear_attn', layer_number=2)
+    module = Gathered(config=config, tp_comm_buffer_name="linear_attn", layer_number=2)
     assert type(module) is Gathered
-    assert calls[1][3] == {'layer_number': 2}
+    assert calls[1][3] == {"layer_number": 2}
 
     # RMSNorm matches the fused module's layout: norm weight, no norm bias.
     assert module.layer_norm_bias is None
@@ -202,20 +221,26 @@ def test_subclass_with_layernorm_keeps_norm_bias(stub_module):
     class Gathered(patched):
         def __init__(self, config, tp_comm_buffer_name, **kwargs):
             super().__init__(
-                input_size=config.hidden_size, output_size=config.hidden_size,
-                config=config, gather_output=False, bias=False, skip_bias_add=False,
-                is_expert=False, tp_comm_buffer_name=tp_comm_buffer_name,
+                input_size=config.hidden_size,
+                output_size=config.hidden_size,
+                config=config,
+                gather_output=False,
+                bias=False,
+                skip_bias_add=False,
+                is_expert=False,
+                tp_comm_buffer_name=tp_comm_buffer_name,
             )
 
-    config = _norm_config('LayerNorm')
+    config = _norm_config("LayerNorm")
     config.hidden_size = 16
-    module = Gathered(config=config, tp_comm_buffer_name='linear_mlp')
+    module = Gathered(config=config, tp_comm_buffer_name="linear_mlp")
     assert module.layer_norm_bias is not None
     assert sum(p.numel() for p in module.parameters()) == 16 * 16 + 16 + 16
     x = torch.randn(2, 16)
     out, _ = module(x)
     reference = torch.nn.functional.layer_norm(
-        x, (16,), module.layer_norm_weight, module.layer_norm_bias, 1e-5)
+        x, (16,), module.layer_norm_weight, module.layer_norm_bias, 1e-5
+    )
     torch.testing.assert_close(out, torch.nn.functional.linear(reference, module.weight))
 
 
@@ -237,17 +262,18 @@ def test_base_class_rmsnorm_still_uses_fused_module(stub_module):
         def sharded_state_dict(self, *args, **kwargs):
             return original_sharded(self, *args, **kwargs)
 
-    stub_module('megatron.core.extensions.transformer_engine', HAVE_TE=True,
-                TEColumnParallelLinear=Fused)
+    stub_module(
+        "megatron.core.extensions.transformer_engine", HAVE_TE=True, TEColumnParallelLinear=Fused
+    )
     patched = _layer_norm._unfused_te_layer_norm_linear(Original)
-    config = _norm_config('RMSNorm')
+    config = _norm_config("RMSNorm")
     module = patched(16, 8, config=config)
     assert type(module) is Original
-    assert constructed, 'exact base with RMSNorm must keep the fused construction'
+    assert constructed, "exact base with RMSNorm must keep the fused construction"
 
 
 @pytest.mark.integration
-@pytest.mark.parametrize('ranks', [1, 2])
+@pytest.mark.parametrize("ranks", [1, 2])
 def test_musa_fp8_norm_linear(ranks):
     """Real TE FP8 parameters, BF16/FP8 backward, TP/SP and checkpoint sharding."""
     import os
@@ -255,13 +281,22 @@ def test_musa_fp8_norm_linear(ranks):
     import sys
     from pathlib import Path
 
-    if os.environ.get('MEGATRON_MUSA_RUN_INTEGRATION') != '1':
-        pytest.skip('set MEGATRON_MUSA_RUN_INTEGRATION=1 with a working Megatron/MUSA stack')
-    env = integration_env({'CUDA_DEVICE_MAX_CONNECTIONS': '1'})
+    if os.environ.get("MEGATRON_MUSA_RUN_INTEGRATION") != "1":
+        pytest.skip("set MEGATRON_MUSA_RUN_INTEGRATION=1 with a working Megatron/MUSA stack")
+    env = integration_env({"CUDA_DEVICE_MAX_CONNECTIONS": "1"})
     result = subprocess.run(
-        [sys.executable, '-m', 'torch.distributed.run', '--standalone',
-         f'--nproc_per_node={ranks}', str(Path(__file__).with_name('te_layer_norm_smoke.py'))],
-        env=env, capture_output=True, text=True, timeout=300,
+        [
+            sys.executable,
+            "-m",
+            "torch.distributed.run",
+            "--standalone",
+            f"--nproc_per_node={ranks}",
+            str(Path(__file__).with_name("te_layer_norm_smoke.py")),
+        ],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=300,
     )
     assert result.returncode == 0, result.stdout + result.stderr
-    assert result.stdout.count('TE_PASS') == 8 * ranks
+    assert result.stdout.count("TE_PASS") == 8 * ranks

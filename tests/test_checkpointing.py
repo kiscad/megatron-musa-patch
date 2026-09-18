@@ -81,8 +81,7 @@ def test_worker_arguments_preserved(writer, monkeypatch, use_msc):
     sink = _Sink()
     writer.write_preloaded_data_multiproc(transforms, use_msc, 7, BUCKETS, sink)
     assert seen == [
-        (idx, bucket, {"use_fsync": True, "use_msc": use_msc})
-        for idx, bucket in enumerate(BUCKETS)
+        (idx, bucket, {"use_fsync": True, "use_msc": use_msc}) for idx, bucket in enumerate(BUCKETS)
     ]
     assert sink.payload == {0: [], 1: []}
 
@@ -179,7 +178,9 @@ def dcp_selector(stub_module):
     cuda = SimpleNamespace(current_stream=lambda: SimpleNamespace(device=device))
     stub_module("torch", musa=SimpleNamespace(is_available=lambda: True), cuda=cuda)
     original = lambda: "cuda"
-    module = stub_module("torch.distributed.checkpoint.filesystem", _get_available_device_type=original)
+    module = stub_module(
+        "torch.distributed.checkpoint.filesystem", _get_available_device_type=original
+    )
     yield module, original, device
     _checkpointing._uninstall_dcp_device()
 
@@ -217,6 +218,6 @@ def test_dcp_selector_without_musa(dcp_selector, monkeypatch):
     import sys
 
     module, original, _ = dcp_selector
-    monkeypatch.setattr(sys.modules['torch'].musa, 'is_available', lambda: False)
+    monkeypatch.setattr(sys.modules["torch"].musa, "is_available", lambda: False)
     assert not _checkpointing._install_dcp_device()
     assert module._get_available_device_type is original

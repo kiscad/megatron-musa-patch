@@ -96,13 +96,11 @@ def _build_norm_fallback_class(base: Any = None, cast_to_input: bool = False) ->
             weight = self.weight + 1 if self.zero_centered_gamma else self.weight
             bias = self.bias
             if self._cast_output_to_input and weight.dtype != input.dtype:
-                weight = weight.to(input.dtype)
-                bias = bias.to(input.dtype) if bias is not None else None
+                weight = weight.to(input.dtype)  # type: ignore[assignment]
+                bias = bias.to(input.dtype) if bias is not None else None  # type: ignore[assignment]
             if self.normalization == "RMSNorm":
                 return torch.nn.functional.rms_norm(input, self.hidden_size, weight, self.eps)
-            return torch.nn.functional.layer_norm(
-                input, self.hidden_size, weight, bias, self.eps
-            )
+            return torch.nn.functional.layer_norm(input, self.hidden_size, weight, bias, self.eps)
 
     return FusedLayerNorm
 
@@ -198,14 +196,22 @@ def _unfused_te_layer_norm_linear(original: Any) -> Any:
             self.normalization = config.normalization
             self.eps = config.layernorm_epsilon
             self.zero_centered_gamma = config.layernorm_zero_centered_gamma
-            self.layer_norm_weight = torch.nn.Parameter(torch.full(
-                (input_size,), 0.0 if self.zero_centered_gamma else 1.0,
-                dtype=config.params_dtype, device=self.weight.device,
-            ))
+            self.layer_norm_weight = torch.nn.Parameter(
+                torch.full(
+                    (input_size,),
+                    0.0 if self.zero_centered_gamma else 1.0,
+                    dtype=config.params_dtype,
+                    device=self.weight.device,
+                )
+            )
             if self.normalization == "LayerNorm":
-                self.layer_norm_bias = torch.nn.Parameter(torch.zeros(
-                    input_size, dtype=config.params_dtype, device=self.weight.device,
-                ))
+                self.layer_norm_bias = torch.nn.Parameter(
+                    torch.zeros(
+                        input_size,
+                        dtype=config.params_dtype,
+                        device=self.weight.device,
+                    )
+                )
             else:
                 # Match the fused module's RMSNorm layout: no norm bias.
                 self.register_parameter("layer_norm_bias", None)
@@ -220,12 +226,14 @@ def _unfused_te_layer_norm_linear(original: Any) -> Any:
             weight = self.layer_norm_weight.to(x.dtype)
             weight = weight + 1 if self.zero_centered_gamma else weight
             if self.normalization == "RMSNorm":
-                normalized = torch.nn.functional.rms_norm(
-                    x, (x.shape[-1],), weight, self.eps
-                )
+                normalized = torch.nn.functional.rms_norm(x, (x.shape[-1],), weight, self.eps)
             else:
                 normalized = torch.nn.functional.layer_norm(
-                    x, (x.shape[-1],), weight, self.layer_norm_bias.to(x.dtype), self.eps,
+                    x,
+                    (x.shape[-1],),
+                    weight,
+                    self.layer_norm_bias.to(x.dtype),
+                    self.eps,
                 )
             return super().forward(normalized)
 
@@ -280,7 +288,7 @@ def _te_norm_unfused(original: Any) -> Any:
     extra_kwargs_fn = getattr(module, "_get_extra_te_kwargs", None)
 
     def build(te_cls, normalization):
-        class TENormFallback(te_cls):
+        class TENormFallback(te_cls):  # type: ignore[valid-type,misc]
             _megatron_musa_patch_fallback = True
 
             def __init__(self, config, hidden_size, eps=1e-5):
@@ -295,7 +303,7 @@ def _te_norm_unfused(original: Any) -> Any:
                 self.config = config
                 self.normalization = normalization
                 self.hidden_size = torch.Size(
-                    (hidden_size,) if isinstance(hidden_size, numbers.Integral) else hidden_size
+                    (hidden_size,) if isinstance(hidden_size, numbers.Integral) else hidden_size  # type: ignore[arg-type]
                 )
 
             def forward(self, input):
@@ -308,9 +316,7 @@ def _te_norm_unfused(original: Any) -> Any:
                     return torch.nn.functional.layer_norm(
                         input, self.hidden_size, weight, bias, self.eps
                     )
-                return torch.nn.functional.rms_norm(
-                    input, self.hidden_size, weight, self.eps
-                )
+                return torch.nn.functional.rms_norm(input, self.hidden_size, weight, self.eps)
 
         TENormFallback.__name__ = f"TENorm{normalization}Fallback"
         return TENormFallback
@@ -328,9 +334,9 @@ def _te_norm_unfused(original: Any) -> Any:
             if normalization == "LayerNorm":
                 return layernorm_fallback(config, hidden_size, eps)
             if normalization == "RMSNorm":
-                assert hasattr(te.pytorch, "RMSNorm"), (
-                    "Transformer-Engine >= v0.11 required to use this feature"
-                )
+                assert hasattr(
+                    te.pytorch, "RMSNorm"
+                ), "Transformer-Engine >= v0.11 required to use this feature"
                 return rmsnorm_fallback(config, hidden_size, eps)
             raise Exception("Only LayerNorm and RMSNorm are curently supported")
 

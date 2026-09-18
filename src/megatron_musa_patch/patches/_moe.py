@@ -39,9 +39,7 @@ def _fp64_topk(torch, input, k, dim, largest, sorted):
     """
     if dim is None:
         dim = -1  # torch.topk's documented default
-    _, cpu_indices = torch.topk(
-        input.detach().cpu(), k=k, dim=dim, largest=largest, sorted=sorted
-    )
+    _, cpu_indices = torch.topk(input.detach().cpu(), k=k, dim=dim, largest=largest, sorted=sorted)
     indices = cpu_indices.to(input.device)
     return input.gather(dim, indices), indices
 
@@ -56,20 +54,16 @@ class _MoeTorchProxy:
         return getattr(self._torch, name)
 
     def topk(self, input, k, dim=None, largest=True, sorted=True, *, out=None):
-        if (
-            input.dtype == self._torch.float64
-            and input.device.type == "musa"
-            and _musa_live()
-        ):
+        if input.dtype == self._torch.float64 and input.device.type == "musa" and _musa_live():
             logger.debug(
                 "MoE topk FP64 reference path: shape=%s k=%s dim=%s",
-                tuple(input.shape), k, dim,
+                tuple(input.shape),
+                k,
+                dim,
             )
             return _fp64_topk(self._torch, input, k, dim, largest, sorted)
         if out is not None:
-            return self._torch.topk(
-                input, k, dim=dim, largest=largest, sorted=sorted, out=out
-            )
+            return self._torch.topk(input, k, dim=dim, largest=largest, sorted=sorted, out=out)
         return self._torch.topk(input, k, dim=dim, largest=largest, sorted=sorted)
 
 
@@ -89,11 +83,14 @@ def _fp64_topk_works_on_musa() -> bool:
     except Exception as exc:  # noqa: BLE001 - any failure means still broken
         _compat.logger.info(
             "moe topk fp64 probe failed, keeping the reference path (%s: %s)",
-            type(exc).__name__, exc)
+            type(exc).__name__,
+            exc,
+        )
         return False
     _compat.logger.info(
-        "moe topk fp64-reference declined: fp64 topk works on this "
-        "torch_musa build (%s)", _compat.torch_musa_version())
+        "moe topk fp64-reference declined: fp64 topk works on this " "torch_musa build (%s)",
+        _compat.torch_musa_version(),
+    )
     return True
 
 
@@ -133,17 +130,23 @@ def _moe_permute_unfused(original: Any) -> Any:
     """
 
     @functools.wraps(original)
-    def permute(tokens, routing_map, probs=None, num_out_tokens=None, fused=False,
-                drop_and_pad=False):
+    def permute(
+        tokens, routing_map, probs=None, num_out_tokens=None, fused=False, drop_and_pad=False
+    ):
         demote = fused and _fused_permute_unsupported(tokens)
         if demote:
             logger.debug(
                 "MoE permute unfused fallback: dtype=%s shape=%s",
-                tokens.dtype, tuple(tokens.shape),
+                tokens.dtype,
+                tuple(tokens.shape),
             )
         return original(
-            tokens, routing_map, probs=probs, num_out_tokens=num_out_tokens,
-            fused=False if demote else fused, drop_and_pad=drop_and_pad,
+            tokens,
+            routing_map,
+            probs=probs,
+            num_out_tokens=num_out_tokens,
+            fused=False if demote else fused,
+            drop_and_pad=drop_and_pad,
         )
 
     return permute
@@ -153,16 +156,25 @@ def _moe_unpermute_unfused(original: Any) -> Any:
     """Demote the fused MoE unpermute; pairs with the permute fallback."""
 
     @functools.wraps(original)
-    def unpermute(permuted_tokens, sorted_indices, restore_shape, probs=None,
-                  routing_map=None, fused=False, drop_and_pad=False):
+    def unpermute(
+        permuted_tokens,
+        sorted_indices,
+        restore_shape,
+        probs=None,
+        routing_map=None,
+        fused=False,
+        drop_and_pad=False,
+    ):
         demote = fused and _fused_permute_unsupported(permuted_tokens)
         if demote:
-            logger.debug(
-                "MoE unpermute unfused fallback: dtype=%s", permuted_tokens.dtype
-            )
+            logger.debug("MoE unpermute unfused fallback: dtype=%s", permuted_tokens.dtype)
         return original(
-            permuted_tokens, sorted_indices, restore_shape, probs=probs,
-            routing_map=routing_map, fused=False if demote else fused,
+            permuted_tokens,
+            sorted_indices,
+            restore_shape,
+            probs=probs,
+            routing_map=routing_map,
+            fused=False if demote else fused,
             drop_and_pad=drop_and_pad,
         )
 
@@ -195,7 +207,6 @@ PATCHES = (
             "the native kernel. "
             "Declines when an fp64-topk capability probe passes "
             "on this torch_musa build; this small probe is not a full kernel test."
-
         ),
         upstream=(
             "NVIDIA/Megatron-LM megatron/core/transformer/moe/moe_utils.py "

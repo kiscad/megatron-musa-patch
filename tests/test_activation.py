@@ -1,11 +1,12 @@
 """Public activation and entry-point loading, isolated from unit registries."""
+
 from __future__ import annotations
 
 import os
-from pathlib import Path
 import subprocess
 import sys
 import textwrap
+from pathlib import Path
 
 import pytest
 
@@ -17,7 +18,10 @@ def _run(script, **switches):
     env["PYTHONPATH"] = str(Path(__file__).resolve().parents[1] / "src")
     completed = subprocess.run(
         [sys.executable, "-c", textwrap.dedent(script)],
-        env=env, capture_output=True, text=True, timeout=30,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=30,
     )
     assert completed.returncode == 0, completed.stdout + completed.stderr
 
@@ -36,7 +40,8 @@ def test_explicit_import_only_installs_watcher():
 
 
 def test_entrypoint_load_honours_autoload_switch():
-    _run("""
+    _run(
+        """
         import sys, types
         from importlib.machinery import ModuleSpec
         torch = types.ModuleType('torch')
@@ -50,7 +55,9 @@ def test_entrypoint_load_honours_autoload_switch():
         torch.__spec__._initializing = False
         m.install()  # explicit activation still works after EntryPoint.load
         assert m.ENGINE._installed
-    """, MEGATRON_MUSA_PATCH_AUTOLOAD="0")
+    """,
+        MEGATRON_MUSA_PATCH_AUTOLOAD="0",
+    )
 
 
 def test_entrypoint_catches_install_failure():

@@ -7,6 +7,7 @@ the native MT-TE flash path; every other eligible input runs TE's own unfused
 backend; segmented THD is sliced into per-sequence vendor calls. Only ordinary
 tensors, CP=1, vanilla softmax and unrestricted windows are handled.
 """
+
 from __future__ import annotations
 
 import functools
@@ -26,6 +27,7 @@ _MAX_FLASH_DIM = 192
 
 def _musa_live() -> bool:
     import torch
+
     musa = getattr(torch, "musa", None)
     available = getattr(musa, "is_available", None)
     return callable(available) and bool(available())
@@ -46,12 +48,15 @@ def _flash_kernel_unsupported(self, query, key=None, value=None) -> bool:
     Measured on torch_musa 2.7.1 / MT-TE 2.0.0 / flash-attn 2.6.3.
     """
     import torch
+
     if not _musa_live() or query.device.type != "musa":
         return False
     tensors = [t for t in (query, key, value) if t is not None]
-    return (any(t.dtype not in (torch.float16, torch.bfloat16) for t in tensors) or
-            any(not _MIN_FLASH_DIM <= t.size(-1) <= _MAX_FLASH_DIM for t in tensors) or
-            _effective_dropout(self) != 0.0)
+    return (
+        any(t.dtype not in (torch.float16, torch.bfloat16) for t in tensors)
+        or any(not _MIN_FLASH_DIM <= t.size(-1) <= _MAX_FLASH_DIM for t in tensors)
+        or _effective_dropout(self) != 0.0
+    )
 
 
 def _mask_type_name(attn_mask_type) -> str:
@@ -66,24 +71,36 @@ def _attn_mask_type_value(name):
     """
     try:
         from megatron.core.transformer.enums import AttnMaskType
+
         return getattr(AttnMaskType, name)
     except Exception:
         from types import SimpleNamespace
+
         return SimpleNamespace(name=name)
 
 
 def _dispatch_contract(self, query, key, value, packed, num_splits):
     """Do not bypass upstream validation/parallel or quantization protocols."""
     import torch
+
     if any(type(t) is not torch.Tensor for t in (query, key, value)):
         return False
-    if any(t.dtype not in (torch.float16, torch.bfloat16, torch.float32, torch.float64)
-           for t in (query, key, value)):
+    if any(
+        t.dtype not in (torch.float16, torch.bfloat16, torch.float32, torch.float64)
+        for t in (query, key, value)
+    ):
         return False
     config = getattr(self, "config", None)
-    if any(getattr(config, name, False) for name in
-           ("fp8_dot_product_attention", "fp8_multi_head_attention", "qk_clip",
-            "log_max_attention_logit", "apply_query_key_layer_scaling")):
+    if any(
+        getattr(config, name, False)
+        for name in (
+            "fp8_dot_product_attention",
+            "fp8_multi_head_attention",
+            "qk_clip",
+            "log_max_attention_logit",
+            "apply_query_key_layer_scaling",
+        )
+    ):
         return False
     if getattr(config, "softmax_type", "vanilla") != "vanilla":
         return False
@@ -119,6 +136,7 @@ def _te_padding_mask(attention_mask, sq, sk, attention_type="self"):
     cross-attention. Returns ``None`` for masks this adapter does not claim.
     """
     import torch
+
     if attention_mask is None:
         return None
 
@@ -143,8 +161,7 @@ def _te_padding_mask(attention_mask, sq, sk, attention_type="self"):
         if len(shaped_masks) != 2:
             return None
         q_mask, k_mask = shaped_masks
-        if (q_mask.shape[-1] != sq or k_mask.shape[-1] != sk
-                or q_mask.shape[0] != k_mask.shape[0]):
+        if q_mask.shape[-1] != sq or k_mask.shape[-1] != sk or q_mask.shape[0] != k_mask.shape[0]:
             return None
         return q_mask, k_mask
     if attention_type != "self" or sq != sk:
@@ -158,8 +175,7 @@ def _te_padding_mask(attention_mask, sq, sk, attention_type="self"):
     return shaped_masks[0]
 
 
-def _unfused_forward(self, query, key, value, attention_mask, mask_name,
-                     attention_bias, layout):
+def _unfused_forward(self, query, key, value, attention_mask, mask_name, attention_bias, layout):
     """Run TE's own ``UnfusedDotProductAttention`` backend, or give up with None."""
     backend = getattr(self, "unfused_attention", None)
     if backend is None:
@@ -170,9 +186,7 @@ def _unfused_forward(self, query, key, value, attention_mask, mask_name,
         sq, sk = query.shape[0], key.shape[0]
     mask = None
     if "padding" in mask_name:
-        mask = _te_padding_mask(
-            attention_mask, sq, sk, getattr(backend, "attention_type", "self")
-        )
+        mask = _te_padding_mask(attention_mask, sq, sk, getattr(backend, "attention_type", "self"))
         if mask is None:
             return None
     elif attention_mask is not None:
@@ -190,33 +204,65 @@ def _unfused_forward(self, query, key, value, attention_mask, mask_name,
     )
 
 
-def _dense_dispatch(self, query, key, value, attention_mask, attn_mask_type,
-                    mask_name, attention_bias, layout, original):
+def _dense_dispatch(
+    self,
+    query,
+    key,
+    value,
+    attention_mask,
+    attn_mask_type,
+    mask_name,
+    attention_bias,
+    layout,
+    original,
+):
     """Flash when the kernel supports the inputs, TE's unfused backend otherwise.
 
     ``attn_mask_type`` is forwarded to ``original`` untouched (it must remain
     the caller's enum value); ``mask_name`` is the string form used internally.
     """
     if not _flash_kernel_unsupported(self, query, key, value):
-        return original(self, query, key, value, attention_mask, attn_mask_type,
-                        attention_bias=attention_bias, packed_seq_params=None,
-                        num_splits=None)
-    out = _unfused_forward(self, query, key, value, attention_mask, mask_name,
-                           attention_bias, layout)
+        return original(
+            self,
+            query,
+            key,
+            value,
+            attention_mask,
+            attn_mask_type,
+            attention_bias=attention_bias,
+            packed_seq_params=None,
+            num_splits=None,
+        )
+    out = _unfused_forward(
+        self, query, key, value, attention_mask, mask_name, attention_bias, layout
+    )
     if out is not None:
         return out
     # Nothing claims these inputs: surface the vendor error instead of guessing.
-    return original(self, query, key, value, attention_mask, attn_mask_type,
-                    attention_bias=attention_bias, packed_seq_params=None,
-                    num_splits=None)
+    return original(
+        self,
+        query,
+        key,
+        value,
+        attention_mask,
+        attn_mask_type,
+        attention_bias=attention_bias,
+        packed_seq_params=None,
+        num_splits=None,
+    )
 
 
 def _packed_spans(cumulative, padded, total):
     """Read only O(batch) metadata; keep activations and gradients on device."""
     lengths = cumulative.detach().cpu().tolist()
     offsets = lengths if padded is None else padded.detach().cpu().tolist()
-    if (len(lengths) < 2 or len(offsets) != len(lengths) or
-            lengths[0] != 0 or offsets[0] != 0 or offsets[-1] != total):
+    if (
+        len(lengths) < 2
+        or len(offsets) != len(lengths)
+        or lengths[0] != 0
+        or offsets[0] != 0
+        or offsets[-1] != total
+    ):
         raise ValueError("Invalid packed cumulative lengths/physical offsets")
     spans = []
     for i in range(len(lengths) - 1):
@@ -236,10 +282,13 @@ def _packed_forward(self, query, key, value, mask_name, packed, original):
     backend). Empty sequences keep zero-valued outputs with gradient edges.
     """
     import torch
-    q_spans = _packed_spans(packed.cu_seqlens_q,
-                            getattr(packed, "cu_seqlens_q_padded", None), query.shape[0])
-    k_spans = _packed_spans(packed.cu_seqlens_kv,
-                            getattr(packed, "cu_seqlens_kv_padded", None), key.shape[0])
+
+    q_spans = _packed_spans(
+        packed.cu_seqlens_q, getattr(packed, "cu_seqlens_q_padded", None), query.shape[0]
+    )
+    k_spans = _packed_spans(
+        packed.cu_seqlens_kv, getattr(packed, "cu_seqlens_kv_padded", None), key.shape[0]
+    )
     if len(q_spans) != len(k_spans) or key.shape[0] != value.shape[0]:
         raise ValueError("Packed query/key/value sequences must match")
     # Spans hold only valid tokens, so the padding qualifier is meaningless
@@ -251,12 +300,24 @@ def _packed_forward(self, query, key, value, mask_name, packed, original):
     for (qs, nq, capacity), (ks, nk, _) in zip(q_spans, k_spans):
         # clone() detaches the span from the packed storage: TE's layout probe
         # rejects non-zero storage offsets, and .contiguous() would be a no-op.
-        q, k, v = (query[qs:qs+nq].clone(), key[ks:ks+nk].clone(),
-                   value[ks:ks+nk].clone())
+        q, k, v = (
+            query[qs : qs + nq].clone(),
+            key[ks : ks + nk].clone(),
+            value[ks : ks + nk].clone(),
+        )
         if nq and nk:
-            out = _dense_dispatch(self, q[:, None], k[:, None], v[:, None], None,
-                                  _attn_mask_type_value(span_mask), span_mask,
-                                  None, "sbhd", original)
+            out = _dense_dispatch(
+                self,
+                q[:, None],
+                k[:, None],
+                v[:, None],
+                None,
+                _attn_mask_type_value(span_mask),
+                span_mask,
+                None,
+                "sbhd",
+                original,
+            )
             out = out.reshape(nq, q.shape[-2], v.shape[-1])
         else:
             # Retain zero gradient edges for empty sequences too.
@@ -278,42 +339,88 @@ def _tedpa_forward(original: Any) -> Any:
     dropout or backward correctness. Revalidate those paths after upgrading.
     """
     hardcoded_flash = _compat.module_source_contains(
-        "transformer_engine.musa.pytorch.attention", "use_flash_attention = True")
+        "transformer_engine.musa.pytorch.attention", "use_flash_attention = True"
+    )
     if hardcoded_flash is False:
         _compat.logger.info(
             "capability-dispatch declined: transformer_engine no longer "
-            "hard-codes use_flash_attention (te=%s)", _compat.te_version())
+            "hard-codes use_flash_attention (te=%s)",
+            _compat.te_version(),
+        )
         return None
 
     @functools.wraps(original)
-    def forward(self, query, key, value, attention_mask, attn_mask_type,
-                attention_bias=None, packed_seq_params=None, num_splits=None):
-        import torch
+    def forward(
+        self,
+        query,
+        key,
+        value,
+        attention_mask,
+        attn_mask_type,
+        attention_bias=None,
+        packed_seq_params=None,
+        num_splits=None,
+    ):
         packed = packed_seq_params
-        layout = (getattr(packed, "qkv_format", None) or getattr(self, "qkv_format", "sbhd"))
+        layout = getattr(packed, "qkv_format", None) or getattr(self, "qkv_format", "sbhd")
         mask_name = _mask_type_name(attn_mask_type)
-        allowed_masks = {"no_mask", "causal", "padding", "padding_causal",
-                         "causal_bottom_right", "padding_causal_bottom_right", "arbitrary"}
-        eligible = (_dispatch_contract(self, query, key, value, packed, num_splits)
-                    and mask_name in allowed_masks)
-        if packed is None and attention_mask is None and (
-            "padding" in mask_name or mask_name == "arbitrary"
+        allowed_masks = {
+            "no_mask",
+            "causal",
+            "padding",
+            "padding_causal",
+            "causal_bottom_right",
+            "padding_causal_bottom_right",
+            "arbitrary",
+        }
+        eligible = (
+            _dispatch_contract(self, query, key, value, packed, num_splits)
+            and mask_name in allowed_masks
+        )
+        if (
+            packed is None
+            and attention_mask is None
+            and ("padding" in mask_name or mask_name == "arbitrary")
         ):
             eligible = False
         if getattr(self, "window_size", None) == (-1, 0) and "causal" not in mask_name:
             eligible = False
         if eligible and _musa_live() and query.device.type == "musa":
-            if (layout == "thd" and packed is not None and mask_name != "arbitrary"
-                    and attention_mask is None and attention_bias is None):
+            if (
+                layout == "thd"
+                and packed is not None
+                and mask_name != "arbitrary"
+                and attention_mask is None
+                and attention_bias is None
+            ):
                 return _packed_forward(self, query, key, value, mask_name, packed, original)
             if packed is None and layout in ("sbhd", "bshd"):
-                return _dense_dispatch(self, query, key, value, attention_mask,
-                                       attn_mask_type, mask_name, attention_bias,
-                                       layout, original)
-        return original(self, query, key, value, attention_mask, attn_mask_type,
-                        attention_bias=attention_bias, packed_seq_params=packed,
-                        num_splits=num_splits)
+                return _dense_dispatch(
+                    self,
+                    query,
+                    key,
+                    value,
+                    attention_mask,
+                    attn_mask_type,
+                    mask_name,
+                    attention_bias,
+                    layout,
+                    original,
+                )
+        return original(
+            self,
+            query,
+            key,
+            value,
+            attention_mask,
+            attn_mask_type,
+            attention_bias=attention_bias,
+            packed_seq_params=packed,
+            num_splits=num_splits,
+        )
+
     return forward
+
 
 PATCHES = (
     AttrPatch(

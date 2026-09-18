@@ -74,7 +74,8 @@ def _ignore_overlap_flags_validate_args(original: Any) -> Any:
         # upstream's defaults (which only fill None) from re-enabling overlap.
         defaults = positional[0] if positional else kwargs.get("defaults", {})
         requested = [
-            name for name in _OVERLAP_FLAGS
+            name
+            for name in _OVERLAP_FLAGS
             if getattr(args, name, None)
             or (getattr(args, name, None) is None and defaults.get(name, False))
         ]

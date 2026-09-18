@@ -11,7 +11,14 @@ from megatron_musa_patch.patches import _device_arch, _distributed
 
 @pytest.mark.parametrize(
     "raw,expected",
-    [(None, (8, 3)), ("", (8, 3)), ("  ", (8, 3)), ("9", (9, 0)), (" 9.1 ", (9, 1)), ("10.0", (10, 0))],
+    [
+        (None, (8, 3)),
+        ("", (8, 3)),
+        ("  ", (8, 3)),
+        ("9", (9, 0)),
+        (" 9.1 ", (9, 1)),
+        ("10.0", (10, 0)),
+    ],
 )
 def test_architecture_parse(monkeypatch, raw, expected):
     if raw is None:

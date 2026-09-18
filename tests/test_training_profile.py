@@ -11,8 +11,14 @@ from megatron_musa_patch.patches import _training
 
 @pytest.mark.parametrize("rank", [0, 1])
 def test_pytorch_is_enabled_with_rank_zero_warning(rank, caplog):
-    args = SimpleNamespace(profile=True, use_pytorch_profiler=False, rank=rank,
-                           profile_step_start=4, profile_step_end=6, profile_ranks=[0, 1])
+    args = SimpleNamespace(
+        profile=True,
+        use_pytorch_profiler=False,
+        rank=rank,
+        profile_step_start=4,
+        profile_step_end=6,
+        profile_ranks=[0, 1],
+    )
     original = Mock(return_value=args)
     wrapped = _training._enable_pytorch_profile_validate_args(original)
     defaults = {"profile": True}
@@ -127,7 +133,9 @@ def test_disabled_overlap_does_not_warn_or_change_call_shape(overlap_policy, cap
     "preferred,legacy,skip",
     [(None, "1", True), ("1", "0", True), ("0", "1", False), (None, "0", False)],
 )
-def test_dp_overlap_switch_overrides_legacy_alias(overlap_policy, monkeypatch, preferred, legacy, skip):
+def test_dp_overlap_switch_overrides_legacy_alias(
+    overlap_policy, monkeypatch, preferred, legacy, skip
+):
     monkeypatch.setenv("MEGATRON_MUSA_PATCH_TP_OVERLAP", legacy)
     if preferred is not None:
         monkeypatch.setenv("MEGATRON_MUSA_PATCH_DP_OVERLAP", preferred)
@@ -142,9 +150,7 @@ def test_overlap_validator_exception_propagates(overlap_policy):
 
 
 @pytest.mark.parametrize("ckpt_format", ["torch_dist", "torch", "torch_dcp", "fsdp_dtensor"])
-def test_live_argument_patch_chain_never_rewrites_checkpoint_format(
-    overlap_policy, ckpt_format
-):
+def test_live_argument_patch_chain_never_rewrites_checkpoint_format(overlap_policy, ckpt_format):
     args = SimpleNamespace(ckpt_format=ckpt_format, async_save=True, profile=True)
     wrapped = lambda args: args
     for patch in _training.PATCHES:

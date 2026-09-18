@@ -26,9 +26,7 @@ def test_applies_to_already_imported_module(engine, stub_module):
 
 def test_applies_on_later_import(engine, fake_package):
     name = fake_package("fake_later", "value = 1\n")
-    engine.register(
-        [AttrPatch(id="t.later", target=f"{name}:value", replace=lambda old: old + 41)]
-    )
+    engine.register([AttrPatch(id="t.later", target=f"{name}:value", replace=lambda old: old + 41)])
     engine.install()
 
     assert not engine.is_applied("t.later")
@@ -52,9 +50,7 @@ def test_patch_sees_original_and_can_wrap(engine, stub_module):
 
         return wrapper
 
-    engine.register(
-        [AttrPatch(id="t.wrap", target="fake_wrap:compute", replace=make_wrapper)]
-    )
+    engine.register([AttrPatch(id="t.wrap", target="fake_wrap:compute", replace=make_wrapper)])
     engine.install()
 
     assert seen["original"] is original
@@ -168,7 +164,9 @@ def test_absent_module_stays_pending_until_import_attempt(engine):
 
 def test_declining_patch_is_skipped(engine, stub_module):
     module = stub_module("fake_decline", value=1)
-    engine.register([AttrPatch(id="t.decline", target="fake_decline:value", replace=lambda old: None)])
+    engine.register(
+        [AttrPatch(id="t.decline", target="fake_decline:value", replace=lambda old: None)]
+    )
     engine.install()
 
     assert module.value == 1
@@ -303,13 +301,9 @@ def test_multiple_engines_do_not_recurse_on_lookup(engine):
     """
     package_engine = Engine()  # a second watcher, like the process-wide ENGINE
     try:
-        package_engine.register(
-            [HookPatch(id="t.package", trigger="megatron", run=lambda: None)]
-        )
+        package_engine.register([HookPatch(id="t.package", trigger="megatron", run=lambda: None)])
         package_engine.install()
-        engine.register(
-            [HookPatch(id="t.private", trigger="megatron", run=lambda: None)]
-        )
+        engine.register([HookPatch(id="t.private", trigger="megatron", run=lambda: None)])
         engine.install()
 
         # Any find_spec for the watched module used to raise RecursionError.
@@ -322,9 +316,7 @@ def test_rebind_only_touches_identity_matches(engine, stub_module, fake_package)
     """A same-named but different object must not be clobbered."""
     target = fake_package("fake_identity", "value = 1\n")
     other = fake_package("fake_other", "value = 'unrelated'\n")
-    engine.register(
-        [AttrPatch(id="t.identity", target=f"{target}:value", replace=lambda old: 2)]
-    )
+    engine.register([AttrPatch(id="t.identity", target=f"{target}:value", replace=lambda old: 2)])
     engine.install()
 
     import importlib
@@ -341,8 +333,10 @@ def test_unknown_env_ids_warn_but_apply_rest(engine, stub_module, monkeypatch, c
     import logging
 
     monkeypatch.setenv("MEGATRON_MUSA_PATCH_ONLY", "does-not-exist")
-    module = stub_module("unknown_ids", value=1)
-    engine.register([AttrPatch(id="t.known", target="unknown_ids:value", replace=lambda old: old + 1)])
+    stub_module("unknown_ids", value=1)
+    engine.register(
+        [AttrPatch(id="t.known", target="unknown_ids:value", replace=lambda old: old + 1)]
+    )
     with caplog.at_level(logging.WARNING, logger="megatron_musa_patch"):
         engine.install()
     assert "unknown patch id" in caplog.text
@@ -361,23 +355,25 @@ def test_dot_form_target_splits_on_last_component(engine, stub_module):
 @pytest.fixture
 def gate_metadata(monkeypatch):
     from megatron_musa_patch import _compat
+
     monkeypatch.setattr(_compat, "distribution_version", lambda name: "5.16.1")
 
 
 def test_version_gate_skips_attr_patch_via_engine(engine, monkeypatch, stub_module, gate_metadata):
-    monkeypatch.setenv('MEGATRON_MUSA_PATCH', '1')
-
     """A blocked declarative gate skips the patch with the reason recorded."""
-    import sys
 
     original = object()
     module = stub_module("fake.mod", thing=original)
-    engine.register([AttrPatch(
-        id="fake.gated",
-        target="fake.mod:thing",
-        replace=lambda current: ("replaced",),
-        version_gates=("transformers>=999",),
-    )])
+    engine.register(
+        [
+            AttrPatch(
+                id="fake.gated",
+                target="fake.mod:thing",
+                replace=lambda current: ("replaced",),
+                version_gates=("transformers>=999",),
+            )
+        ]
+    )
     engine.install()
     engine._apply_for_module(module.__name__, module, trigger="already-imported")
     record = next(r for r in engine.report() if r["id"] == "fake.gated")
@@ -388,54 +384,66 @@ def test_version_gate_skips_attr_patch_via_engine(engine, monkeypatch, stub_modu
 
 
 def test_version_gate_applies_within_range(engine, monkeypatch, stub_module, gate_metadata):
-    monkeypatch.setenv('MEGATRON_MUSA_PATCH', '1')
+    monkeypatch.setenv("MEGATRON_MUSA_PATCH", "1")
 
     module = stub_module("fake.mod2", thing=object())
-    engine.register([AttrPatch(
-        id="fake.gated2",
-        target="fake.mod2:thing",
-        replace=lambda current: ("replaced",),
-        version_gates=("transformers>=5",),
-    )])
+    engine.register(
+        [
+            AttrPatch(
+                id="fake.gated2",
+                target="fake.mod2:thing",
+                replace=lambda current: ("replaced",),
+                version_gates=("transformers>=5",),
+            )
+        ]
+    )
     engine.install()
     engine._apply_for_module(module.__name__, module, trigger="already-imported")
     record = next(r for r in engine.report() if r["id"] == "fake.gated2")
     assert record["status"] == "applied", record
-    assert module.thing == ("replaced",)
+    import sys
+
+    assert sys.modules["fake.mod2"].thing == ("replaced",)
 
 
 def test_version_gate_overrides_env(engine, monkeypatch, stub_module, gate_metadata):
-    monkeypatch.setenv('MEGATRON_MUSA_PATCH', '1')
-
     """..._IGNORE_VERSION_GATES=transformers forces the gate to pass."""
     module = stub_module("fake.mod3", thing=object())
     monkeypatch.setenv("MEGATRON_MUSA_PATCH_IGNORE_VERSION_GATES", "transformers")
-    engine.register([AttrPatch(
-        id="fake.gated3",
-        target="fake.mod3:thing",
-        replace=lambda current: ("replaced",),
-        version_gates=("transformers>=999",),
-    )])
+    engine.register(
+        [
+            AttrPatch(
+                id="fake.gated3",
+                target="fake.mod3:thing",
+                replace=lambda current: ("replaced",),
+                version_gates=("transformers>=999",),
+            )
+        ]
+    )
     engine.install()
     engine._apply_for_module(module.__name__, module, trigger="already-imported")
     record = next(r for r in engine.report() if r["id"] == "fake.gated3")
     assert record["status"] == "applied", record
-    assert module.thing == ("replaced",)
+    import sys
+
+    assert sys.modules["fake.mod3"].thing == ("replaced",)
 
 
 def test_version_gate_skips_hook_via_engine(engine, monkeypatch, stub_module, gate_metadata):
-    monkeypatch.setenv('MEGATRON_MUSA_PATCH', '1')
-
     """Hooks honour declarative gates too, recorded as skipped."""
-    module = stub_module("fake.hookmod")
+    stub_module("fake.hookmod")
     ran = []
-    engine.register([HookPatch(
-        id="fake.hook-gated",
-        trigger="fake.hookmod",
-        run=lambda: ran.append(1),
-        undo=lambda: None,
-        version_gates=("transformers>=999",),
-    )])
+    engine.register(
+        [
+            HookPatch(
+                id="fake.hook-gated",
+                trigger="fake.hookmod",
+                run=lambda: ran.append(1),
+                undo=lambda: None,
+                version_gates=("transformers>=999",),
+            )
+        ]
+    )
     engine.install()
     importlib.import_module("fake.hookmod")
     assert ran == []
@@ -446,11 +454,17 @@ def test_version_gate_skips_hook_via_engine(engine, monkeypatch, stub_module, ga
 
 def test_version_gate_malformed_spec_rejected():
     with pytest.raises(ValueError):
-        AttrPatch(id="x", target="fake.m:attr", replace=lambda c: c,
-                  version_gates=("transformer_engine >>2.0",))
+        AttrPatch(
+            id="x",
+            target="fake.m:attr",
+            replace=lambda c: c,
+            version_gates=("transformer_engine >>2.0",),
+        )
     with pytest.raises(ValueError):
-        AttrPatch(id="x", target="fake.m:attr", replace=lambda c: c,
-                  version_gates=("transformer_engine",))
+        AttrPatch(
+            id="x", target="fake.m:attr", replace=lambda c: c, version_gates=("transformer_engine",)
+        )
     with pytest.raises(ValueError):
-        HookPatch(id="y", trigger="fake.m", run=lambda: None,
-                  version_gates=("transformer_engine <abc",))
+        HookPatch(
+            id="y", trigger="fake.m", run=lambda: None, version_gates=("transformer_engine <abc",)
+        )

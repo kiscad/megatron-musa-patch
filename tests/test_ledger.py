@@ -1,4 +1,5 @@
 """Maintenance contract: every patch is identifiable and independently reviewable."""
+
 from __future__ import annotations
 
 import sys
@@ -8,7 +9,7 @@ import pytest
 from megatron_musa_patch import _compat
 from megatron_musa_patch._compat import SUPPORTED_VERSION_SPEC, megatron_importable, parse_version
 from megatron_musa_patch._engine import AppliedPatch, AttrPatch, HookPatch
-from megatron_musa_patch._errors import MegatronMissing, UnsupportedMegatronVersion
+from megatron_musa_patch._errors import MegatronMissing
 from megatron_musa_patch.patches import MODULES, PATCHES
 
 
@@ -75,9 +76,11 @@ def test_patch_modules_do_not_import_other_patch_modules(module):
     for node in ast.walk(tree):
         if isinstance(node, ast.ImportFrom):
             assert node.level != 1, f"{module.__name__} imports a sibling patch module"
-            assert not (node.module or '').startswith('megatron_musa_patch.patches')
+            assert not (node.module or "").startswith("megatron_musa_patch.patches")
         elif isinstance(node, ast.Import):
-            assert not any(alias.name.startswith('megatron_musa_patch.patches') for alias in node.names)
+            assert not any(
+                alias.name.startswith("megatron_musa_patch.patches") for alias in node.names
+            )
 
 
 def test_megatron_importable_probe_is_side_effect_free():
@@ -109,10 +112,17 @@ def test_version_spec_is_parseable():
     assert parse_version(SUPPORTED_VERSION_SPEC.split(",")[0].lstrip(">="))
 
 
-@pytest.mark.parametrize("text,expected", [
-    ("0.16.1", (0, 16, 1)), ("0.16.1rc0", (0, 16, 1)),
-    ("1.2", (1, 2)), ("2", (2,)), (None, ()), ("", ()),
-])
+@pytest.mark.parametrize(
+    "text,expected",
+    [
+        ("0.16.1", (0, 16, 1)),
+        ("0.16.1rc0", (0, 16, 1)),
+        ("1.2", (1, 2)),
+        ("2", (2,)),
+        (None, ()),
+        ("", ()),
+    ],
+)
 def test_parse_version(text, expected):
     assert parse_version(text) == expected
 
@@ -124,7 +134,9 @@ def test_supported_version_spec_bounds_are_enforced():
     assert parse_version(lo.lstrip(">=")) >= (0, 14)
     assert parse_version(hi.lstrip("<")) == (0, 17)
     assert _compat._in_supported_range((0, 14)) and _compat._in_supported_range((0, 16, 1))
-    assert not _compat._in_supported_range((0, 13, 9)) and not _compat._in_supported_range((0, 17, 0))
+    assert not _compat._in_supported_range((0, 13, 9)) and not _compat._in_supported_range(
+        (0, 17, 0)
+    )
 
 
 def test_version_drift_warns_or_raises_per_strict_switch(monkeypatch, caplog):
@@ -143,8 +155,16 @@ def test_version_drift_warns_or_raises_per_strict_switch(monkeypatch, caplog):
 def test_env_flag_parsing(monkeypatch):
     from megatron_musa_patch import _env
 
-    for raw, expected in [("1", True), ("true", True), ("YES", True), ("on", True),
-                          ("0", False), ("false", False), ("", False), (" no ", False)]:
+    for raw, expected in [
+        ("1", True),
+        ("true", True),
+        ("YES", True),
+        ("on", True),
+        ("0", False),
+        ("false", False),
+        ("", False),
+        (" no ", False),
+    ]:
         monkeypatch.setenv("MEGATRON_MUSA_PATCH_PROBE_X", raw)
         assert _env.flag("PROBE_X", True) is expected, raw
     monkeypatch.setenv("MEGATRON_MUSA_PATCH_PROBE_X", "garbage")

@@ -1,9 +1,9 @@
 """Regression coverage for composition, ownership and failure diagnostics."""
+
 from __future__ import annotations
 
 import importlib
 import sys
-import types
 
 import pytest
 
@@ -15,16 +15,20 @@ def _wrap(label):
     def replace(old):
         def wrapper():
             return old() + label
+
         return wrapper
+
     return replace
 
 
 def test_same_target_chain_is_idempotent_and_reloadable(engine, fake_package):
     name = fake_package("chain_target", "def fn(): return 'base'\n")
-    engine.register([
-        AttrPatch("chain.one", f"{name}:fn", _wrap("1")),
-        AttrPatch("chain.two", f"{name}:fn", _wrap("2")),
-    ])
+    engine.register(
+        [
+            AttrPatch("chain.one", f"{name}:fn", _wrap("1")),
+            AttrPatch("chain.two", f"{name}:fn", _wrap("2")),
+        ]
+    )
     engine.apply_now()
     module = sys.modules[name]
     assert module.fn() == "base12"
@@ -62,10 +66,12 @@ def test_failure_is_recorded_and_target_chain_is_atomic(engine, stub_module):
     def fail(old):
         raise ValueError("broken factory")
 
-    engine.register([
-        AttrPatch("good", "atomic_chain:fn", _wrap("1")),
-        AttrPatch("bad", "atomic_chain:fn", fail),
-    ])
+    engine.register(
+        [
+            AttrPatch("good", "atomic_chain:fn", _wrap("1")),
+            AttrPatch("bad", "atomic_chain:fn", fail),
+        ]
+    )
     with pytest.raises(MegatronMusaPatchError, match="broken factory"):
         engine.install()
     assert module.fn is original
@@ -145,11 +151,18 @@ def test_apply_now_respects_master_switch_after_install(engine, fake_package, mo
 def test_reversible_and_irreversible_hooks(engine, stub_module):
     stub_module("hook_cycle")
     calls = []
-    engine.register([
-        HookPatch("reversible", "hook_cycle", lambda: calls.append("run"), undo=lambda: calls.append("undo")),
-        HookPatch("irreversible", "hook_cycle", lambda: calls.append("once")),
-        HookPatch("declined", "hook_cycle", lambda: False),
-    ])
+    engine.register(
+        [
+            HookPatch(
+                "reversible",
+                "hook_cycle",
+                lambda: calls.append("run"),
+                undo=lambda: calls.append("undo"),
+            ),
+            HookPatch("irreversible", "hook_cycle", lambda: calls.append("once")),
+            HookPatch("declined", "hook_cycle", lambda: False),
+        ]
+    )
     engine.install()
     assert [r["status"] for r in engine.report()] == ["applied", "applied", "skipped"]
     engine.unapply()
@@ -168,11 +181,13 @@ def test_failed_hook_keeps_following_hooks_pending_for_retry(engine, stub_module
         if calls.count("flaky") == 1:
             raise RuntimeError("try again")
 
-    engine.register([
-        HookPatch("first", "hook_retry", lambda: calls.append("first")),
-        HookPatch("flaky", "hook_retry", flaky),
-        HookPatch("last", "hook_retry", lambda: calls.append("last")),
-    ])
+    engine.register(
+        [
+            HookPatch("first", "hook_retry", lambda: calls.append("first")),
+            HookPatch("flaky", "hook_retry", flaky),
+            HookPatch("last", "hook_retry", lambda: calls.append("last")),
+        ]
+    )
     with pytest.raises(RuntimeError, match="try again"):
         engine.install()
     engine.apply_now()
@@ -224,10 +239,16 @@ def test_descriptors_and_inherited_attributes_restore_exactly(engine, stub_modul
 
     original = vars(Parent)["class_method"]
     stub_module("descriptor_target", Parent=Parent, Child=Child)
-    engine.register([
-        AttrPatch("static", "descriptor_target:Child.static", lambda old: lambda v: old(v) + 1),
-        AttrPatch("class", "descriptor_target:Parent.class_method", lambda old: lambda cls, v: old(cls, v + 1)),
-    ])
+    engine.register(
+        [
+            AttrPatch("static", "descriptor_target:Child.static", lambda old: lambda v: old(v) + 1),
+            AttrPatch(
+                "class",
+                "descriptor_target:Parent.class_method",
+                lambda old: lambda cls, v: old(cls, v + 1),
+            ),
+        ]
+    )
     engine.install()
     assert Child().static(1) == 3
     assert Parent.class_method(1) == ("Parent", 2)
@@ -242,10 +263,12 @@ def test_alias_repair_is_bounded_and_never_rebinds_flags(engine, stub_module):
     target = stub_module("alias_target", fn=original, flag=True)
     inside = stub_module("megatron.alias_test", fn=original, flag=True)
     outside = stub_module("outside_alias", fn=original, flag=True)
-    engine.register([
-        AttrPatch("alias", "alias_target:fn", _wrap("1")),
-        AttrPatch("flag", "alias_target:flag", lambda old: False),
-    ])
+    engine.register(
+        [
+            AttrPatch("alias", "alias_target:fn", _wrap("1")),
+            AttrPatch("flag", "alias_target:flag", lambda old: False),
+        ]
+    )
     engine.install()
     assert inside.fn is target.fn
     assert outside.fn is original
@@ -272,10 +295,12 @@ def test_multiple_engines_apply_all_hooks_and_attributes(engine, fake_package):
     other = Engine()
     try:
         engine.register([HookPatch("first", name, lambda: calls.append(1))])
-        other.register([
-            HookPatch("second", name, lambda: calls.append(2)),
-            AttrPatch("value", f"{name}:value", lambda old: 42),
-        ])
+        other.register(
+            [
+                HookPatch("second", name, lambda: calls.append(2)),
+                AttrPatch("value", f"{name}:value", lambda old: 42),
+            ]
+        )
         engine.install()
         other.install()
         module = importlib.import_module(name)
@@ -292,7 +317,9 @@ def test_malformed_targets_fail_early(target):
 
 
 @pytest.mark.parametrize("rebuild", [False, True])
-def test_alias_commit_failure_restores_target_and_existing_aliases(engine, stub_module, monkeypatch, rebuild):
+def test_alias_commit_failure_restores_target_and_existing_aliases(
+    engine, stub_module, monkeypatch, rebuild
+):
     from megatron_musa_patch import _engine
 
     original = lambda: "base"
@@ -332,10 +359,12 @@ def test_failed_attribute_undo_is_retryable_and_does_not_block_other_cleanup(eng
     target = Target()
     target.value = 1
     module = stub_module("retry_undo", target=target, other=1)
-    engine.register([
-        AttrPatch("other", "retry_undo:other", lambda old: 2),
-        AttrPatch("target", "retry_undo:target.value", lambda old: 2),
-    ])
+    engine.register(
+        [
+            AttrPatch("other", "retry_undo:other", lambda old: 2),
+            AttrPatch("target", "retry_undo:target.value", lambda old: 2),
+        ]
+    )
     engine.install()
     target.fail = True
     try:
@@ -354,8 +383,15 @@ def test_failed_attribute_undo_is_retryable_and_does_not_block_other_cleanup(eng
 def test_reload_retires_declined_patch_and_repairs_old_consumers(engine, fake_package, stub_module):
     state = {"needed": True}
     name = fake_package("conditional_reload", "def fn(): return 'upstream'\n")
-    engine.register([AttrPatch("conditional", f"{name}:fn",
-                               lambda old: _wrap("patched")(old) if state["needed"] else None)])
+    engine.register(
+        [
+            AttrPatch(
+                "conditional",
+                f"{name}:fn",
+                lambda old: _wrap("patched")(old) if state["needed"] else None,
+            )
+        ]
+    )
     engine.apply_now()
     module = sys.modules[name]
     consumer = stub_module("megatron.late_consumer", fn=module.fn)

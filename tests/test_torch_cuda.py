@@ -353,7 +353,9 @@ def test_plain_tensor_musa_delegates_unchanged(fake_backend):
     tensor = fake_backend.torch.Tensor()
     marker = object()
     assert tensor.musa(marker, True, option=marker) == (
-        "original", (marker, True), {"option": marker}
+        "original",
+        (marker, True),
+        {"option": marker},
     )
 
 
@@ -657,7 +659,7 @@ def test_tensor_musa_subclass_accepts_cuda_spelling(torch):
 def test_transformers_device_cache_refresh_on_unapply(fake_backend, monkeypatch):
     from functools import lru_cache
 
-    module = types.ModuleType('transformers.utils.import_utils')
+    module = types.ModuleType("transformers.utils.import_utils")
 
     @lru_cache(None)
     def is_torch_cuda_available():
@@ -675,7 +677,7 @@ def test_transformers_device_cache_refresh_on_unapply(fake_backend, monkeypatch)
 def test_device_refresh_preserves_unrelated_transformers_cache(fake_backend, monkeypatch):
     from functools import lru_cache
 
-    module = types.ModuleType('transformers.utils.import_utils')
+    module = types.ModuleType("transformers.utils.import_utils")
     calls = []
 
     @lru_cache(None)

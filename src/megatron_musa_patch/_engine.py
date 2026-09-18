@@ -23,12 +23,12 @@ from . import _env
 from ._compat import (
     META_PATH_WATCHER_MARKER,
     check_version,
+    check_version_gate,
     find_spec_without_watchers,
     megatron_version,
     require_attr,
     split_target,
     validate_version_gates,
-    check_version_gate,
 )
 from ._errors import MegatronMusaPatchError, PatchConflict
 
@@ -178,8 +178,9 @@ class _Binding:
             if vars(module).get(name) is self.replacement:
                 setattr(module, name, original)
         # Also repair same-name consumers imported after initial application.
-        _rebind_aliases(self.owner, self.leaf, self.replacement, self.original,
-                       self.rebind_prefixes, targets)
+        _rebind_aliases(
+            self.owner, self.leaf, self.replacement, self.original, self.rebind_prefixes, targets
+        )
 
 
 class _PostExecLoader(importlib.abc.Loader):
@@ -223,7 +224,8 @@ class _ImportWatcher(importlib.abc.MetaPathFinder):
         if not self._engine._watches(fullname):
             return None
         engines = [
-            finder._engine for finder in reversed(sys.meta_path)
+            finder._engine
+            for finder in reversed(sys.meta_path)
             if isinstance(finder, _ImportWatcher) and finder._engine._watches(fullname)
         ]
         spec = find_spec_without_watchers(fullname, path, target)
@@ -236,7 +238,8 @@ class _ImportWatcher(importlib.abc.MetaPathFinder):
         if spec.loader is not None and any(fullname in engine._attrs for engine in engines):
             loader = spec.loader
             if isinstance(loader, importlib.util.LazyLoader):
-                loader = loader.loader
+                inner = getattr(loader, "loader", None)
+                loader = inner if inner is not None else loader
             spec.loader = _PostExecLoader(loader, fullname, engines)
         return spec
 
@@ -271,7 +274,9 @@ class Engine:
             if patch.id in ids:
                 raise ValueError(f"duplicate patch id: {patch.id!r}")
             ids.add(patch.id)
-        self._validate_dependencies([record.patch for record in self._records.values()] + list(patches))
+        self._validate_dependencies(
+            [record.patch for record in self._records.values()] + list(patches)
+        )
         for patch in patches:
             self._records[patch.id] = AppliedPatch(patch)
             if self._installed:
@@ -288,7 +293,7 @@ class Engine:
         requirements are deliberately unsupported: imports own that ordering.
         """
         records = {patch.id: patch for patch in patches}
-        edges = {}
+        edges: dict[tuple[str, str], set[tuple[str, str]]] = {}
         for patch in patches:
             if not isinstance(patch, AttrPatch):
                 continue
@@ -297,10 +302,14 @@ class Engine:
                 dependency = records.get(pid)
                 if dependency is None:
                     continue
-                if (not isinstance(dependency, AttrPatch)
-                        or dependency.module_name != patch.module_name
-                        or dependency.attr_name == patch.attr_name):
-                    raise ValueError(f"{patch.id}: requires {pid} must target another attribute in the same module")
+                if (
+                    not isinstance(dependency, AttrPatch)
+                    or dependency.module_name != patch.module_name
+                    or dependency.attr_name == patch.attr_name
+                ):
+                    raise ValueError(
+                        f"{patch.id}: requires {pid} must target another attribute in the same module"
+                    )
                 edges.setdefault(key, set()).add((dependency.module_name, dependency.attr_name))
         visited, visiting = set(), set()
 
@@ -376,7 +385,9 @@ class Engine:
                 self._run_hooks(module_name)
         for module_name in list(self._attrs):
             module = sys.modules.get(module_name)
-            if module is not None and not getattr(getattr(module, "__spec__", None), "_initializing", False):
+            if module is not None and not getattr(
+                getattr(module, "__spec__", None), "_initializing", False
+            ):
                 self._apply_for_module(module_name, module, trigger="already-imported")
 
     def _watches(self, fullname: str) -> bool:
@@ -392,7 +403,10 @@ class Engine:
         for patch in self._attrs.get(fullname, ()):
             record = self._records[patch.id]
             if record.status == "pending":
-                record.status, record.detail = "failed", f"import failed: {type(exc).__name__}: {exc}"
+                record.status, record.detail = (
+                    "failed",
+                    f"import failed: {type(exc).__name__}: {exc}",
+                )
 
     def _run_hooks(self, module_name: str) -> None:
         if module_name in self._running_hooks:
@@ -422,7 +436,9 @@ class Engine:
         finally:
             self._running_hooks.remove(module_name)
 
-    def _apply_for_module(self, module_name: str, module: types.ModuleType, *, trigger: str) -> None:
+    def _apply_for_module(
+        self, module_name: str, module: types.ModuleType, *, trigger: str
+    ) -> None:
         groups: dict[str, list[AttrPatch]] = {}
         for patch in self._attrs.get(module_name, ()):
             groups.setdefault(patch.attr_name, []).append(patch)
@@ -435,7 +451,11 @@ class Engine:
             for patch in groups[attr]:
                 for pid in patch.requires:
                     record = self._records.get(pid)
-                    if record is not None and record.patch.attr_name in groups:
+                    if (
+                        record is not None
+                        and isinstance(record.patch, AttrPatch)
+                        and record.patch.attr_name in groups
+                    ):
                         apply_target(record.patch.attr_name)
             self._apply_target(module, attr, groups[attr], trigger)
 
@@ -471,9 +491,12 @@ class Engine:
             require_attr(module, attr, patch_id=active.id)
             raw = inspect.getattr_static(owner, leaf)
             if previous is not None and previous.owner is owner and raw is previous.replacement:
-                if all(self._records[p.id].status in {"applied", "skipped"} for p in patches) and not any(
+                if all(
+                    self._records[p.id].status in {"applied", "skipped"} for p in patches
+                ) and not any(
                     self._records[p.id].detail.startswith("requires ")
-                    and all(self.is_applied(pid) for pid in p.requires) for p in patches
+                    and all(self.is_applied(pid) for pid in p.requires)
+                    for p in patches
                 ):
                     return
                 # Newly registered patch on an existing target: rebuild the
@@ -481,7 +504,9 @@ class Engine:
                 current = previous.original
             else:
                 if previous is not None and trigger != "import":
-                    raise PatchConflict(f"patch target {key!r} changed outside the engine; uninstall first")
+                    raise PatchConflict(
+                        f"patch target {key!r} changed outside the engine; uninstall first"
+                    )
                 current = raw
             baseline = current
             outcomes = []
@@ -492,15 +517,27 @@ class Engine:
                     continue
                 unavailable = [pid for pid in active.requires if not self.is_applied(pid)]
                 if unavailable:
-                    outcomes.append((active, "skipped", "requires applied companion(s): " + ", ".join(unavailable)))
+                    outcomes.append(
+                        (
+                            active,
+                            "skipped",
+                            "requires applied companion(s): " + ", ".join(unavailable),
+                        )
+                    )
                     continue
                 # Preserve binding semantics for staticmethod/classmethod.
-                value = current.__func__ if isinstance(current, (staticmethod, classmethod)) else current
+                value = (
+                    current.__func__
+                    if isinstance(current, (staticmethod, classmethod))
+                    else current
+                )
                 replacement = active.replace(value)
                 if replacement is None:
                     outcomes.append((active, "skipped", "patch declined to run"))
                     continue
-                if isinstance(current, (staticmethod, classmethod)) and not isinstance(replacement, (staticmethod, classmethod)):
+                if isinstance(current, (staticmethod, classmethod)) and not isinstance(
+                    replacement, (staticmethod, classmethod)
+                ):
                     replacement = type(current)(replacement)
                 current = replacement
                 outcomes.append((active, "applied", f"trigger={trigger}"))
@@ -511,24 +548,28 @@ class Engine:
                 if previous is not None:
                     # Existing consumer aliases may still point to the previous
                     # generation after reload. Keep their original undo values.
-                    for consumer, name, original in previous.aliases:
+                    for consumer, name, _original in previous.aliases:
                         if vars(consumer).get(name) is previous.replacement:
                             mutations.append((consumer, name, previous.replacement, True, current))
                             setattr(consumer, name, current)
                             binding.aliases.append((consumer, name, baseline))
                     binding.owned = previous.owned if previous.owner is owner else binding.owned
                 if not owner_path:
-                    prefixes = tuple(dict.fromkeys(prefix for p in patches for prefix in p.rebind_prefixes))
+                    prefixes = tuple(
+                        dict.fromkeys(prefix for p in patches for prefix in p.rebind_prefixes)
+                    )
                     # An explicitly registered target has its own lifecycle.
                     # Rebinding it as a consumer would invalidate its ownership
                     # (e.g. initialize/training both patch the same JIT helper).
                     binding.rebind_prefixes = prefixes
                     declared = set()
                     for record in self._records.values():
-                        patch = record.patch
-                        if isinstance(patch, AttrPatch):
-                            declared.add((patch.module_name, patch.attr_name))
-                    binding.aliases.extend(_rebind_aliases(module, leaf, raw, current, prefixes, declared))
+                        gate_patch = record.patch
+                        if isinstance(gate_patch, AttrPatch):
+                            declared.add((gate_patch.module_name, gate_patch.attr_name))
+                    binding.aliases.extend(
+                        _rebind_aliases(module, leaf, raw, current, prefixes, declared)
+                    )
                 self._bindings[key] = binding
                 if key not in self._undo_order:
                     self._undo_order.append(key)
@@ -540,10 +581,14 @@ class Engine:
                     if vars(consumer).get(name) is previous.replacement:
                         mutations.append((consumer, name, previous.replacement, True, baseline))
                         setattr(consumer, name, baseline)
-                declared = {(p.module_name, p.attr_name) for r in self._records.values()
-                            if isinstance(p := r.patch, AttrPatch)}
-                _rebind_aliases(owner, leaf, previous.replacement, baseline,
-                                previous.rebind_prefixes, declared)
+                declared = {
+                    (p.module_name, p.attr_name)
+                    for r in self._records.values()
+                    if isinstance(p := r.patch, AttrPatch)
+                }
+                _rebind_aliases(
+                    owner, leaf, previous.replacement, baseline, previous.rebind_prefixes, declared
+                )
                 self._bindings.pop(key)
                 self._undo_order.remove(key)
             for patch, status, detail in outcomes:
@@ -583,9 +628,12 @@ class Engine:
         self._attrs.clear()
         self._hooks.clear()
         errors = []
-        retained = []
-        targets = {(p.module_name, p.attr_name) for r in self._records.values()
-                   if isinstance(p := r.patch, AttrPatch)}
+        retained: list[Union[tuple[str, str], HookPatch]] = []
+        targets = {
+            (p.module_name, p.attr_name)
+            for r in self._records.values()
+            if isinstance(p := r.patch, AttrPatch)
+        }
         for item in reversed(self._undo_order):
             if isinstance(item, HookPatch):
                 record = self._records[item.id]
@@ -606,21 +654,29 @@ class Engine:
                     errors.append(exc)
                     retained.append(item)
                     for record in self._records.values():
-                        patch = record.patch
-                        if isinstance(patch, AttrPatch) and (patch.module_name, patch.attr_name) == item:
+                        owned = record.patch
+                        if (
+                            isinstance(owned, AttrPatch)
+                            and (owned.module_name, owned.attr_name) == item
+                        ):
                             record.status, record.detail = "failed", f"undo failed: {exc}"
                 else:
                     self._bindings.pop(item)
         self._undo_order = list(reversed(retained))
         retained_ids = {item.id for item in retained if isinstance(item, HookPatch)}
-        retained_ids.update(record.patch.id for record in self._records.values()
-                            if isinstance(record.patch, AttrPatch)
-                            and (record.patch.module_name, record.patch.attr_name) in retained)
+        retained_ids.update(
+            record.patch.id
+            for record in self._records.values()
+            if isinstance(record.patch, AttrPatch)
+            and (record.patch.module_name, record.patch.attr_name) in retained
+        )
         for record in self._records.values():
             if record.patch.id not in retained_ids:
                 record.status, record.detail = "pending", "uninstalled"
         if errors:
-            raise MegatronMusaPatchError(f"patch cleanup failed: {errors[0]}; see report()") from errors[0]
+            raise MegatronMusaPatchError(
+                f"patch cleanup failed: {errors[0]}; see report()"
+            ) from errors[0]
 
     def is_applied(self, patch_id: str | None = None) -> bool:
         if patch_id is not None:
@@ -632,10 +688,14 @@ class Engine:
         return [record.as_dict() for record in self._records.values()]
 
     def pending_modules(self) -> list[str]:
-        return sorted({
-            name for watch in (self._attrs, self._hooks) for name, patches in watch.items()
-            if any(self._records[p.id].status == "pending" for p in patches)
-        })
+        return sorted(
+            {
+                name
+                for watch in (self._attrs, self._hooks)
+                for name, patches in watch.items()
+                if any(self._records[p.id].status == "pending" for p in patches)
+            }
+        )
 
     def __iter__(self) -> Iterator[AppliedPatch]:
         return iter(self._records.values())
@@ -649,7 +709,7 @@ def _rebind_aliases(module, attr: str, old: Any, new: Any, prefixes: tuple[str, 
     """
     if not isinstance(old, (types.FunctionType, types.BuiltinFunctionType, type)):
         return []
-    aliases = []
+    aliases: list[tuple[types.ModuleType, str, Any]] = []
     for name, consumer in list(sys.modules.items()):
         if (name, attr) in targets or consumer is module or type(consumer) is not types.ModuleType:
             continue

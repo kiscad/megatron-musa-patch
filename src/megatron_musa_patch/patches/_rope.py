@@ -146,9 +146,7 @@ def _apex_fused_thd(original: Any) -> Any:
     _, apex_fused_thd = kernels
 
     @functools.wraps(apex_fused_thd)
-    def fused_apply_rotary_pos_emb_thd(
-        t, cu_seqlens, freqs, cp_size: int = 1, cp_rank: int = 0
-    ):
+    def fused_apply_rotary_pos_emb_thd(t, cu_seqlens, freqs, cp_size: int = 1, cp_rank: int = 0):
         """Apply rotary positional embedding to ``t`` in ``thd`` format.
 
         Like the Transformer Engine kernel Megatron calls on NVIDIA, apex expects
@@ -217,29 +215,30 @@ def _unfused_where_apex_cannot_fuse(original: Any) -> Any:
         return None
 
     @functools.wraps(original)
-    def apply_rotary_pos_emb(
-        t, freqs, config, cu_seqlens=None, mscale: float = 1.0, cp_group=None
-    ):
+    def apply_rotary_pos_emb(t, freqs, config, cu_seqlens=None, mscale: float = 1.0, cp_group=None):
         reason = ""
         if config.apply_rope_fusion:
             reason = _unfusable_reason(
-                config, cu_seqlens, cp_group,
+                config,
+                cu_seqlens,
+                cp_group,
                 apex_bshd=_is_apex_kernel(_bound_kernel("fused_apply_rotary_pos_emb")),
                 apex_thd=_is_apex_kernel(_bound_kernel("fused_apply_rotary_pos_emb_thd")),
             )
-        if (not reason and config.apply_rope_fusion
-                and getattr(config, "rotary_interleaved", False)):
+        if not reason and config.apply_rope_fusion and getattr(config, "rotary_interleaved", False):
             # Core can expose a native TE wrapper even when TE < 2.3 rejects
             # interleaved RoPE. Respect Core's real version guard, and only
             # adapt its exact binding (never infer capabilities of a foreign one).
             import sys
 
             extension = sys.modules.get("megatron.core.extensions.transformer_engine")
-            name = ("fused_apply_rotary_pos_emb" if cu_seqlens is None
-                    else "fused_apply_rotary_pos_emb_thd")
+            name = (
+                "fused_apply_rotary_pos_emb"
+                if cu_seqlens is None
+                else "fused_apply_rotary_pos_emb_thd"
+            )
             kernel = _bound_kernel(name)
-            if (extension is not None and kernel is not None
-                    and kernel is vars(extension).get(name)):
+            if extension is not None and kernel is not None and kernel is vars(extension).get(name):
                 version_check = vars(extension).get("is_te_min_version")
                 if callable(version_check) and not version_check("2.3.0"):
                     reason = "interleaved"
@@ -251,8 +250,11 @@ def _unfused_where_apex_cannot_fuse(original: Any) -> Any:
             reason,
             "megatron-musa-patch: the installed fused RoPE cannot serve %s on MUSA; "
             "using Megatron's unfused rotary embedding for those layers.",
-            "rotary_interleaved models" if reason == "interleaved"
-            else "packed sequences with context parallel > 1",
+            (
+                "rotary_interleaved models"
+                if reason == "interleaved"
+                else "packed sequences with context parallel > 1"
+            ),
         )
         local_config = copy(config)
         local_config.apply_rope_fusion = False

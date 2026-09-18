@@ -117,9 +117,7 @@ compare("thd-backward", grad_fused, grad_reference, atol=0.1, rtol=0.05)
 
 # --- interleaved is demoted to the unfused kernel, not fused ----------------
 interleaved = through_megatron(x, freqs, rotary_interleaved=True)
-reference_interleaved = through_megatron(
-    x, freqs, rotary_interleaved=True, apply_rope_fusion=False
-)
+reference_interleaved = through_megatron(x, freqs, rotary_interleaved=True, apply_rope_fusion=False)
 compare("interleaved-demotion", interleaved, reference_interleaved, atol=0.1, rtol=0.05)
 assert config.rotary_interleaved is False, "the config flag must be left untouched"
 assert config.apply_rope_fusion is True, "the config flag must be left untouched"
@@ -129,8 +127,11 @@ packed_interleaved = through_megatron(
     packed, packed_freqs, cu_seqlens=cu_seqlens, rotary_interleaved=True
 )
 packed_reference = through_megatron(
-    packed, packed_freqs, cu_seqlens=cu_seqlens,
-    rotary_interleaved=True, apply_rope_fusion=False,
+    packed,
+    packed_freqs,
+    cu_seqlens=cu_seqlens,
+    rotary_interleaved=True,
+    apply_rope_fusion=False,
 )
 compare("thd-interleaved-forward", packed_interleaved, packed_reference, atol=0.1, rtol=0.05)
 actual_grad = gradients(
@@ -138,8 +139,9 @@ actual_grad = gradients(
     packed.detach().clone().requires_grad_(True),
 )
 expected_grad = gradients(
-    lambda t: through_megatron(t, packed_freqs, cu_seqlens=cu_seqlens,
-                               rotary_interleaved=True, apply_rope_fusion=False),
+    lambda t: through_megatron(
+        t, packed_freqs, cu_seqlens=cu_seqlens, rotary_interleaved=True, apply_rope_fusion=False
+    ),
     packed.detach().clone().requires_grad_(True),
 )
 compare("thd-interleaved-backward", actual_grad, expected_grad, atol=0.1, rtol=0.05)

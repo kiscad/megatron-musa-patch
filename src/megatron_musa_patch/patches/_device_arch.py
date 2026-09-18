@@ -66,6 +66,7 @@ def _install_torch_capability() -> bool | None:
     original = vars(owner).get("get_device_capability", _MISSING)
     owner.get_device_capability = get_device_capability
     _capability_override = (owner, original, get_device_capability)
+    return None  # applied; the hook contract distinguishes decline (False)
 
 
 def _uninstall_torch_capability() -> None:

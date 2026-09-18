@@ -1,4 +1,5 @@
 """The teardown hook owns only its callback, independently of device adaptation."""
+
 import atexit
 import sys
 from types import SimpleNamespace
@@ -10,10 +11,13 @@ from megatron_musa_patch.patches import _distributed
 
 
 @pytest.mark.parametrize("initialized", [False, True])
-def test_teardown_is_independent_and_uninstall_does_not_destroy_groups(engine, stub_module, monkeypatch, initialized):
+def test_teardown_is_independent_and_uninstall_does_not_destroy_groups(
+    engine, stub_module, monkeypatch, initialized
+):
     callbacks = []
-    dist = SimpleNamespace(is_available=lambda: True, is_initialized=lambda: initialized,
-                           destroy_process_group=Mock())
+    dist = SimpleNamespace(
+        is_available=lambda: True, is_initialized=lambda: initialized, destroy_process_group=Mock()
+    )
     stub_module("megatron")
     stub_module("torch", distributed=dist)
     monkeypatch.setitem(sys.modules, "torch.distributed", dist)
@@ -32,8 +36,9 @@ def test_teardown_is_independent_and_uninstall_does_not_destroy_groups(engine, s
 
 
 def _premul_patch():
-    return next(p for p in _distributed.PATCHES
-                if p.id == "megatron.fsdp.premul-sum.device-prescale")
+    return next(
+        p for p in _distributed.PATCHES if p.id == "megatron.fsdp.premul-sum.device-prescale"
+    )
 
 
 def test_fsdp_premul_sum_branch_prescales_and_uses_sum(stub_module):
@@ -53,8 +58,7 @@ def test_fsdp_premul_sum_branch_prescales_and_uses_sum(stub_module):
         return "ORIGINAL_OP"
 
     reduce_op = SimpleNamespace(SUM="SUM")
-    stub_module("torch", bfloat16="bf16-marker",
-                distributed=SimpleNamespace(ReduceOp=reduce_op))
+    stub_module("torch", bfloat16="bf16-marker", distributed=SimpleNamespace(ReduceOp=reduce_op))
     stub_module("torch.distributed", ReduceOp=reduce_op)
 
     patch = _premul_patch()
@@ -86,8 +90,9 @@ def test_fsdp_premul_patch_registered_target():
 
 
 def _subgroups_patch():
-    return next(p for p in _distributed.PATCHES
-                if p.id == "megatron.bridge-communicator.subgroups-backend")
+    return next(
+        p for p in _distributed.PATCHES if p.id == "megatron.bridge-communicator.subgroups-backend"
+    )
 
 
 def _subgroups_env(musa_available=True):
@@ -105,6 +110,7 @@ def _subgroups_env(musa_available=True):
 
     types.SimpleNamespace(musa=types.SimpleNamespace(is_available=lambda: musa_available))
     import torch  # the runtime musa probe reads the real namespace
+
     monkey_musa = types.SimpleNamespace(is_available=lambda: musa_available)
     original_musa = getattr(torch, "musa", None)
     torch.musa = monkey_musa
@@ -175,7 +181,7 @@ def test_subgroups_proxy_forwards_everything_else():
     assert proxy.get_rank() == 3
     assert proxy.is_initialized() is True
     with pytest.raises(AttributeError):
-        proxy.nonexistent
+        proxy.nonexistent  # noqa: B018 -- deliberate missing-attribute probe
 
 
 def test_subgroups_patches_target_the_megatron_callers():

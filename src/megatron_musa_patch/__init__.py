@@ -57,22 +57,15 @@ from . import _env
 from ._compat import SUPPORTED_VERSION_SPEC, logger, megatron_version
 from ._engine import ENGINE, AppliedPatch, AttrPatch, HookPatch
 from ._errors import (
-    MegatronMusaPatchError,
     MegatronMissing,
+    MegatronMusaPatchError,
     MusaUnavailable,
     PatchConflict,
     PatchTargetMissing,
     UnsupportedMegatronVersion,
 )
-from .activation import (
-    apply,
-    install,
-    is_applied,
-    report,
-    torch_backend_autoload,
-    uninstall,
-)
-from .activation import torch_backend_autoload as _torch_backend_autoload
+from .activation import torch_backend_autoload  # also the "torch.backends" entry point target
+from .activation import apply, install, is_applied, report, uninstall
 
 
 def _distribution_version() -> str:

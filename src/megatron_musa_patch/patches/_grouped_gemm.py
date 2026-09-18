@@ -55,9 +55,7 @@ def gmm(a, b, tokens_per_expert, trans_b=False):
         outputs.append(torch.matmul(a[start:end], weight))
         start = end
     if start != a.size(0):
-        raise ValueError(
-            f"tokens_per_expert sums to {start} but a has {a.size(0)} rows"
-        )
+        raise ValueError(f"tokens_per_expert sums to {start} but a has {a.size(0)} rows")
     if not outputs:
         return a.new_zeros((a.size(0), b.size(-1)))
     return torch.cat(outputs, dim=0)
@@ -91,7 +89,6 @@ def _assert_grouped_gemm_is_available(original: Any) -> Any:
 
     @functools.wraps(original)
     def assert_grouped_gemm_is_available() -> None:
-        import sys
 
         module = _grouped_gemm_module()
         check = getattr(module, "grouped_gemm_is_available", None)

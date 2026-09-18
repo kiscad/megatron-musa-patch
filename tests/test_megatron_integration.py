@@ -20,11 +20,9 @@ import sys
 import textwrap
 
 import pytest
-
 from conftest import integration_env
 
-SCRIPT = textwrap.dedent(
-    """
+SCRIPT = textwrap.dedent("""
     import json, sys
 
     import megatron_musa_patch as mmp
@@ -107,8 +105,7 @@ SCRIPT = textwrap.dedent(
         result["fused_kernels_load_is_noop"] = fused_kernels.load(None) is None
 
     print("@@RESULT@@" + json.dumps(result))
-    """
-)
+    """)
 
 
 @pytest.fixture(scope="module")

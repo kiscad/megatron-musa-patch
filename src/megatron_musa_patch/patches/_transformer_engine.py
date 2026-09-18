@@ -110,6 +110,7 @@ def _script_factory_aliases(torch_module):
     add CUDA-string translation inside TorchScript graphs.
     """
     import types
+
     from torch.jit import _builtins
 
     missing = object()
@@ -119,15 +120,20 @@ def _script_factory_aliases(torch_module):
         except Exception as exc:  # noqa: BLE001 - private API, torch-version bound
             _compat.logger.info(
                 "factory-shim passthrough: torch.jit._builtins._get_builtin_table "
-                "unavailable in this torch build (%s: %s)", type(exc).__name__, exc)
+                "unavailable in this torch build (%s: %s)",
+                type(exc).__name__,
+                exc,
+            )
             yield
             return
         changed = []
         try:
             for name in _FACTORY_NAMES:
                 wrapper = getattr(torch_module, name, None)
-                if (type(wrapper) is not types.FunctionType
-                        or wrapper.__module__ != "transformer_engine.musa"):
+                if (
+                    type(wrapper) is not types.FunctionType
+                    or wrapper.__module__ != "transformer_engine.musa"
+                ):
                     continue
                 closure = dict(zip(wrapper.__code__.co_freevars, wrapper.__closure__ or ()))
                 cell = closure.get(f"original_{name}")
@@ -149,7 +155,7 @@ def _script_factory_aliases(torch_module):
                 table[key] = op
             yield
         finally:
-            for key, wrapper, op in reversed(changed):
+            for key, _wrapper, op in reversed(changed):
                 if table.get(key) is op:
                     del table[key]
 
@@ -160,16 +166,20 @@ def _install_jit_script_compat() -> bool:
     if _jit_script_owned is not None or not _te_fork_needs_mem_monitor():
         return False
     shimmed = _compat.module_source_contains(
-        "transformer_engine.musa", "torch.arange = patched_arange")
+        "transformer_engine.musa", "torch.arange = patched_arange"
+    )
     if shimmed is False:
         # The installed TE no longer wraps factory functions: the alias guard
         # would never register anything, so skip owning torch.jit.script.
         _compat.logger.info(
             "factory-shim skipped: transformer_engine.musa has no factory "
             "wrappers (te=%s torch_musa=%s)",
-            _compat.te_version(), _compat.torch_musa_version())
+            _compat.te_version(),
+            _compat.torch_musa_version(),
+        )
         return False
     import inspect
+
     import torch
 
     original = torch.jit.script
@@ -219,23 +229,27 @@ def _install_safe_te_utils_module() -> bool:
 
     global _utils_module_owned
     name = "transformer_engine.musa.pytorch.utils"
-    if (name in sys.modules or _utils_module_owned is not None
-            or not _te_fork_needs_mem_monitor()):
+    if name in sys.modules or _utils_module_owned is not None or not _te_fork_needs_mem_monitor():
         return False
     unsafe = _compat.module_source_contains(
         "transformer_engine.musa.pytorch.utils",
-        "for k in sys.modules:", "getattr(sys.modules[k], target, None)")
+        "for k in sys.modules:",
+        "getattr(sys.modules[k], target, None)",
+    )
     if unsafe is False:
         # The installed TE fixed the fragile loop: seeding would shadow the
         # vendor's repaired module with this replica, so decline instead.
         _compat.logger.info(
             "safe-seed skipped: transformer_engine utils module no longer "
-            "iterates sys.modules (te=%s)", _compat.te_version())
+            "iterates sys.modules (te=%s)",
+            _compat.te_version(),
+        )
         return False
 
     module = types.ModuleType(name)
     module.__package__ = name.rpartition(".")[0]
     from importlib.machinery import ModuleSpec
+
     module.__spec__ = ModuleSpec(name, loader=None)
 
     def wrap_name(src_name: str) -> str:
@@ -315,9 +329,7 @@ def _cpu_offload_context_by_signature(original: Any) -> Any:
         return None
     if any(p.kind is p.VAR_POSITIONAL for p in parameters):
         return None
-    accepted = sum(
-        p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD) for p in parameters
-    )
+    accepted = sum(p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD) for p in parameters)
     if accepted != 5:  # >= 6: upstream's choice is right; fewer: not this fork
         return None
 
@@ -331,9 +343,7 @@ def _cpu_offload_context_by_signature(original: Any) -> Any:
         double_buffering,
     ):
         """Get CPU offload context and sync function (five-argument TE)."""
-        return target(
-            enabled, num_layers, model_layers, activation_offloading, weight_offloading
-        )
+        return target(enabled, num_layers, model_layers, activation_offloading, weight_offloading)
 
     return get_cpu_offload_context
 
@@ -345,7 +355,7 @@ def _te_fork_needs_mem_monitor() -> bool:
 
     try:
         distribution = md.distribution("transformer_engine")
-        musa_dir = Path(distribution.locate_file("transformer_engine/musa"))
+        musa_dir = Path(str(distribution.locate_file("transformer_engine/musa")))
     except Exception:  # noqa: BLE001 - distribution metadata is best effort
         return False
     return musa_dir.exists()
