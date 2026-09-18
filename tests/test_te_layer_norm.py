@@ -113,6 +113,73 @@ def test_te_norm_linear_opt_out(monkeypatch):
     assert _layer_norm._unfused_te_layer_norm_linear(object()) is None
 
 
+@pytest.mark.parametrize("normalization", ["LayerNorm"])
+def test_norm_linear_absorbs_mixed_dtype_input(stub_module, monkeypatch, normalization):
+    """A wider input dtype must be absorbed at the norm, TE-style.
+
+    Upstream's learned position embedding is a plain ``torch.nn.Embedding``
+    (fp32 by default) while the model runs bf16, so the embedding sum reaches
+    the first norm in fp32. TE's op contract computes in the parameter dtype
+    and casts the *input*; casting the parameters instead leaks fp32 into the
+    next TE linear, which asserts "Data types for parameters must match when
+    outside of autocasted region" (a2a overlap suite). RMSNorm always
+    constructs the original fused module by design, so only LayerNorm runs
+    this class's forward.
+    """
+    monkeypatch.delenv("MEGATRON_MUSA_PATCH_TE_FUSED_LAYERNORM", raising=False)
+
+    class Linear(torch.nn.Module):
+        def __init__(self, input_size, output_size, *, config, **kwargs):
+            super().__init__()
+            self.weight = torch.nn.Parameter(
+                torch.randn(output_size, input_size, dtype=torch.bfloat16)
+            )
+            self.bias = None
+
+        def forward(self, x):
+            assert x.dtype == self.weight.dtype, "linear must see the parameter dtype"
+            return torch.nn.functional.linear(x, self.weight), None
+
+    def sharded(self, *args, **kwargs):
+        return self.state_dict()
+
+    stub_module(
+        "megatron.core.extensions.transformer_engine", HAVE_TE=True, TEColumnParallelLinear=Linear
+    )
+    fallback = _layer_norm._unfused_te_layer_norm_linear(
+        SimpleNamespace(sharded_state_dict=sharded)
+    )
+    config = SimpleNamespace(
+        normalization=normalization,
+        layernorm_epsilon=1e-5,
+        layernorm_zero_centered_gamma=False,
+        params_dtype=torch.bfloat16,
+        sequence_parallel=True,
+    )
+    module = fallback(16, 8, config=config)
+    assert module.layer_norm_weight.dtype == torch.bfloat16
+    x = torch.randn(4, 16, dtype=torch.float32, requires_grad=True)
+    actual, _ = module(x)
+    assert actual.dtype == torch.bfloat16, "mixed dtype must not leak past the norm"
+    # TE's convention: the input is cast before the norm, so the reference
+    # computes on x.to(bf16) with bf16 parameters.
+    ref_x = x.detach().to(torch.bfloat16).float().requires_grad_(True)
+    gamma = module.layer_norm_weight.detach().float()
+    if normalization == "LayerNorm":
+        ref_bias = module.layer_norm_bias.detach().float()
+        norm = torch.nn.functional.layer_norm(ref_x, (16,), gamma, ref_bias, 1e-5)
+    else:
+        dimensions = (-1,)
+        norm = ref_x * torch.rsqrt(ref_x.square().mean(dimensions, keepdim=True) + 1e-5)
+        norm = norm * gamma
+    expected = torch.nn.functional.linear(norm, module.weight.detach().float())
+    torch.testing.assert_close(actual.float(), expected, atol=0.2, rtol=0.05)
+    actual.float().sum().backward()
+    assert x.grad is not None and x.grad.dtype == torch.float32
+    assert module.layer_norm_weight.grad is not None
+    assert module.layer_norm_weight.grad.dtype == torch.bfloat16
+
+
 def test_te_unavailable_skips_norm_linear_patch(engine, stub_module):
     # Match upstream: deriving from a MagicMock produces another mock rather
     # than a real class, discarding methods from the class body.

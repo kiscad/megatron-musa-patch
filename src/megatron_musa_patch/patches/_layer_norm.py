@@ -22,6 +22,26 @@ from ..backends import musa_available as _musa_live
 __all__ = ["PATCHES"]
 
 
+def _te_norm_compute_dtype(torch, params_dtype):
+    """TE's effective norm dtype: ``maybe_autocast_dtype(default=weight.dtype)``.
+
+    TransformerEngine's basic norm ``op_forward`` resolves the compute dtype
+    from the *parameters* (or the autocast dtype when one is active) and casts
+    the *input* to it -- ``x = reshape(input_, ..., dtype=dtype)`` in
+    ``pytorch/ops/basic/layer_norm.py``. That contract is what absorbs a
+    mixed-dtype activation (e.g. a bf16 model fed the fp32 learned
+    position-embedding sum: ``torch.nn.Embedding`` defaults to fp32 while
+    ``VocabParallelEmbedding`` honors ``params_dtype``) before the next TE
+    linear asserts ``input.dtype == param.dtype``. Casting the other way --
+    parameters to the input's dtype -- leaks the wider dtype downstream
+    instead (observed as "Data types for parameters must match when outside of
+    autocasted region" in the a2a overlap suite).
+    """
+    if torch.is_autocast_enabled("cuda"):
+        return torch.get_autocast_dtype("cuda")
+    return params_dtype
+
+
 def _build_norm_fallback_class(base: Any = None, cast_to_input: bool = False) -> Any:
     """The functional LayerNorm/RMSNorm class shared by the norm patches.
 
@@ -222,9 +242,21 @@ def _unfused_te_layer_norm_linear(original: Any) -> Any:
                     parameter.allreduce = True
 
         def forward(self, x):
-            # TE casts norm inputs/parameters to the activation dtype. Under
-            # autocast x can differ from params_dtype; casts retain autograd.
-            weight = self.layer_norm_weight.to(x.dtype)
+            # TE's fused op chain normalizes in
+            # maybe_autocast_dtype(default=norm-weight dtype) and casts the
+            # input to it; the following linear therefore sees the parameter
+            # dtype outside autocast. Mirror that here so a mixed-dtype
+            # activation (fp32 position-embedding sum into a bf16 model) is
+            # absorbed at the norm exactly like the native kernel does.
+            dtype = _te_norm_compute_dtype(torch, self.layer_norm_weight.dtype)
+            if x.dtype != dtype:
+                x = x.to(dtype)
+            weight = self.layer_norm_weight
+            if dtype != weight.dtype:
+                weight = weight.to(dtype)
+            bias = self.layer_norm_bias
+            if bias is not None and dtype != bias.dtype:
+                bias = bias.to(dtype)
             weight = weight + 1 if self.zero_centered_gamma else weight
             if self.normalization == "RMSNorm":
                 normalized = torch.nn.functional.rms_norm(x, (x.shape[-1],), weight, self.eps)
@@ -233,7 +265,7 @@ def _unfused_te_layer_norm_linear(original: Any) -> Any:
                     x,
                     (x.shape[-1],),
                     weight,
-                    self.layer_norm_bias.to(x.dtype),
+                    bias,
                     self.eps,
                 )
             return super().forward(normalized)
@@ -258,9 +290,12 @@ def _te_norm_unfused(original: Any) -> Any:
     assertion in transformer_engine ops/basic/layer_norm.py). The replacement
     subclasses those TE modules -- so ``isinstance`` checks, parameter names,
     dtypes, initialization and ``sharded_state_dict`` stay TE's -- and only
-    replaces ``forward`` with the functional implementation, casting the norm
-    parameters to the input dtype exactly like TE's kernel contract. TE_NORM=1
-    keeps upstream for upgrade validation.
+    replaces ``forward`` with the functional implementation. The dtype
+    contract matches TE's ``op_forward``: the compute dtype is the autocast
+    dtype when autocast is active and the parameter dtype otherwise, and the
+    *input* is cast to it (never the reverse), so mixed-dtype activations are
+    absorbed exactly like the native kernel. TE_NORM=1 keeps upstream for
+    upgrade validation.
     """
     import sys
 
@@ -300,12 +335,23 @@ def _te_norm_unfused(original: Any) -> Any:
                 )
 
             def forward(self, input):
+                # Same contract as TE's basic norm op_forward: compute in
+                # maybe_autocast_dtype(default=weight.dtype), casting the
+                # input (never promoting the parameters to the input's
+                # dtype). The output therefore leaves in the parameter dtype,
+                # absorbing mixed-dtype activations before the next TE module.
+                dtype = _te_norm_compute_dtype(torch, self.weight.dtype)
+                if input.dtype != dtype:
+                    input = input.to(dtype)
                 weight = self.weight
+                if dtype != weight.dtype:
+                    weight = weight.to(dtype)
                 if getattr(self, "zero_centered_gamma", False):
                     weight = weight + 1
-                weight = weight.to(input.dtype)
                 if normalization == "LayerNorm":
-                    bias = self.bias.to(input.dtype)
+                    bias = self.bias
+                    if bias is not None and dtype != bias.dtype:
+                        bias = bias.to(dtype)
                     return torch.nn.functional.layer_norm(
                         input, self.hidden_size, weight, bias, self.eps
                     )
@@ -351,7 +397,11 @@ PATCHES = (
         ),
         strategy=(
             "For LayerNorm only, use PyTorch normalization followed by TEColumnParallelLinear, "
-            "retaining FP8, TP, norm parameter names and sharding. The exact base class with a "
+            "retaining FP8, TP, norm parameter names and sharding. The norm step follows TE's "
+            "op contract: it computes in maybe_autocast_dtype(default=norm-weight dtype) and "
+            "casts the input to it, so a mixed-dtype activation (the fp32 learned "
+            "position-embedding sum entering a bf16 model) is absorbed here instead of "
+            "tripping the next TE linear's dtype assert. The exact base class with a "
             "non-LayerNorm config still constructs the original fused module; subclasses always "
             "run their own constructor (the fused signature cannot accept their "
             "(config, tp_comm_buffer_name) call shape) and this class then honors the config's "
@@ -468,8 +518,12 @@ PATCHES = (
             "LayerNorm/RMSNorm chosen from config.normalization, so isinstance "
             "checks, parameter names, dtypes, initialization and "
             "sharded_state_dict stay TE's, while forward runs the functional "
-            "norm with parameters cast to the input dtype (TE's kernel "
-            "contract). Upstream validation for unsupported normalization "
+            "norm under TE's own dtype contract: the compute dtype is "
+            "maybe_autocast_dtype(default=weight.dtype) and the *input* is "
+            "cast to it, never the reverse, so mixed-dtype activations (the "
+            "fp32 learned position-embedding sum entering a bf16 model) are "
+            "absorbed exactly like the native kernel instead of leaking to the "
+            "next TE linear. Upstream validation for unsupported normalization "
             "values is retained. Only declines (keeping upstream) when TE is "
             "absent, no MUSA runtime is live, or TE_NORM=1 requests the "
             "upgrade-validation path."
