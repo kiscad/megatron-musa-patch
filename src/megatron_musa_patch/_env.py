@@ -41,6 +41,15 @@ Variable                           Meaning                               Default
                                    TileLang dispatch of Megatron's (and
                                    mcore-bridge's) chunked gated delta
                                    rule, keeping flash-linear-attention.
+``..._ATTN_BACKEND``              Attention kernel order for the shapes  ``auto``
+                                   the MuDNN flash backward rejects:
+                                   ``auto`` (native flash inside its
+                                   measured backward window, then mate's
+                                   TileLang flash, then TE's unfused
+                                   backend), ``mudnn`` (native flash
+                                   whenever the forward accepts it),
+                                   ``mate`` (prefer the TileLang kernels),
+                                   ``unfused`` (reference backend).
 ``..._JIT_WARMUP``                 ``1`` keeps upstream's JIT warm-up.   ``0``
 ``..._CKPT_FORK``                  ``1`` keeps upstream's forked         ``0``
                                    checkpoint writer.

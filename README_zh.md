@@ -167,6 +167,7 @@ MEGATRON_LM_PATH=/path/to/Megatron-LM PYTHON=/path/to/venv/bin/python \
 | `MEGATRON_MUSA_PATCH_IGNORE_VERSION_GATES` | 空 | `1`/`true`/`*` 放行所有版本门控；包名列表只放行指定包。不会绕过能力探针和补丁选择。 |
 | `MEGATRON_MUSA_PATCH_ROPE_FUSION` | `1` | 设为 `0` 拒绝 apex 融合 RoPE 回退，上游会继续报告 `apply_rope_fusion` 不可用。 |
 | `MEGATRON_MUSA_PATCH_GDN_TILELANG` | `1` | 设为 `0` 拒绝 torch-kernels TileLang 的 chunked gated delta rule 分发，全部保留 flash-linear-attention。 |
+| `MEGATRON_MUSA_PATCH_ATTN_BACKEND` | `auto` | MuDNN flash 反向不支持的输入形状的 kernel 选择顺序：`auto`（实测反向安全窗口内用原生 flash，其次 mate 的 TileLang flash，最后 TE 非融合后端）、`mudnn`（前向可跑即用原生 flash）、`mate`（优先 TileLang kernel）、`unfused`（参考后端）。 |
 | `MEGATRON_MUSA_PATCH_JIT_WARMUP` | `0` | 设为 `1` 保留上游的 JIT 预热。 |
 | `MEGATRON_MUSA_PATCH_CKPT_FORK` | `0` | 设为 `1` 保留上游的 fork 式 checkpoint writer。 |
 | `MEGATRON_MUSA_PATCH_DP_OVERLAP` | `0` | 设为 `1` 恢复 DP-overlap 开关（旧写法 `MEGATRON_MUSA_PATCH_TP_OVERLAP` 在本变量未设置时生效）。 |

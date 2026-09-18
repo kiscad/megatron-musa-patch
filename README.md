@@ -163,6 +163,7 @@ All three channels are idempotent. Automatic activation and explicit import regi
 | `MEGATRON_MUSA_PATCH_IGNORE_VERSION_GATES` | *(empty)* | `1`/`true`/`*` bypasses all version gates; a comma-separated distribution list bypasses only those gates. Capability probes and patch selection still apply. |
 | `MEGATRON_MUSA_PATCH_ROPE_FUSION` | `1` | `0` declines the apex fused-RoPE fallback, so upstream keeps reporting `apply_rope_fusion` as unavailable. |
 | `MEGATRON_MUSA_PATCH_GDN_TILELANG` | `1` | `0` declines the torch-kernels TileLang dispatch of the chunked gated delta rule, keeping flash-linear-attention's kernels everywhere. |
+| `MEGATRON_MUSA_PATCH_ATTN_BACKEND` | `auto` | Attention kernel order for the shapes MuDNN's flash backward rejects: `auto` (native flash inside its measured backward window, then mate's TileLang flash, then TE's unfused backend), `mudnn` (native flash whenever the forward accepts it), `mate` (prefer the TileLang kernels), `unfused` (reference backend). |
 | `MEGATRON_MUSA_PATCH_JIT_WARMUP` | `0` | `1` keeps upstream's JIT warm-up. |
 | `MEGATRON_MUSA_PATCH_CKPT_FORK` | `0` | `1` keeps upstream's forked checkpoint writer. |
 | `MEGATRON_MUSA_PATCH_DP_OVERLAP` | `0` | `1` honours the DP-overlap flags again (legacy spelling `MEGATRON_MUSA_PATCH_TP_OVERLAP` applies when this is unset). |
