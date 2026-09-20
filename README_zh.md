@@ -142,7 +142,6 @@ MUSA 版 PyTorch 完全没有 `_cuda_*` 绑定，`torch.cuda` 是空壳，而 Me
 | `megatron.legacy.fused-kernels.load.noop` | `legacy.fused_kernels:load` | 该 loader 探测 `nvcc`/定义扩展构建入口——没有 MUSA 构建路径 |
 | `megatron.training.set-jit-fusion-options.noop`（含 `initialize` 别名） | `set_jit_fusion_options` | 启动期 CUDA 预热/编译路径需先在 MUSA 上验证；验证前跳过 |
 | `megatron.dist-ckpt.musa-cpu-staging` | DCP filesystem 设备选择器（Megatron hook） | CUDA 兼容层下按实际 MUSA stream 选择设备，避免跳过 CPU staging；保留上游异步拷贝、同步和 checkpoint 分片 |
-| `megatron.dist-ckpt.no-fork-writer` | `FileSystemWriterAsync.write_preloaded_data_multiproc` | MUSA 初始化后 fork 的 bucket worker 在 `torch.save` 中段错误并卡死父进程；改为当前进程内顺序写同样的 bucket |
 | `megatron.training.overlap-flags.noop` | `training.arguments:validate_args` | 观测到的 TE fused-wgrad/DDP 组合会让 `param.grad` 为 None，破坏 Megatron overlap 反向 hook；DP-overlap 开关被强制关闭并告警 |
 | `megatron.training.profile.pytorch` | `training.arguments:validate_args` | 裸 `--profile` 会走 `cudaProfilerStart/Stop`/NVTX，MUSA 运行时不提供；改为自动启用 `--use-pytorch-profiler` |
 | `megatron.training.start-time.integer-microseconds` | `training:torch` | 仅在 MCCL 上将启动时间 MIN 归约转换为整数微秒 |
@@ -156,7 +155,6 @@ MUSA 版 PyTorch 完全没有 `_cuda_*` 绑定，`torch.cuda` 是空壳，而 Me
 ### 需要知道的取舍
 
 * `torch.cuda.is_available()` 是对 MUSA 的实时探测，不是常量——但上游有几处把它当作「是不是 NVIDIA」的探针（例如 FP8 checkpoint 路径用它决定是否 import TransformerEngine）；要开 FP8 checkpoint 请先复核这几处。
-* checkpoint bucket 写入在进程内串行（吞吐换稳定，不改格式）。如果你的 MUSA 版本可以 fork-after-init，设 `MEGATRON_MUSA_PATCH_CKPT_FORK=1` 恢复上游的 fork 式 writer。Megatron 外层的异步保存路径（`async_utils.DynamicAsyncCaller`）仍会独立 fork，不受本 patch 影响。
 * DP-overlap 开关（`--overlap-grad-reduce` / `--overlap-param-gather`）被 fused-wgrad/DDP 集成策略关闭，可能降低吞吐。`MEGATRON_MUSA_PATCH_DP_OVERLAP=1` 可恢复上游行为用于测试（旧写法 `MEGATRON_MUSA_PATCH_TP_OVERLAP` 仍有效）。`tp_comm_overlap` 不受影响。
 * 单独的 `--profile` 会自动启用 `--use-pytorch-profiler`，并在 rank 0 打印警告。用 `MEGATRON_MUSA_PATCH_DISABLE` 跳过 `megatron.training.profile.pytorch` 可恢复上游 profiler 选择。
 * rope 融合是 MUSA 上的 kernel 选择，而非上游默认实现：融合 kernel 来自摩尔线程的 apex，且只融合 apex 实现了的组合。`rotary_interleaved` 模型以及 context parallel 下的 packed 序列会降级到 Megatron 的非融合 rotary embedding，并打印一次告警——结果正确、速度较慢，但不再直接报错。`MEGATRON_MUSA_PATCH_ROPE_FUSION=0` 可完全拒绝该回退，此时上游的 `apply_rope_fusion is not available` 报错依旧存在（需自行加 `--no-rope-fusion`）。
@@ -210,7 +208,6 @@ MEGATRON_LM_PATH=/path/to/Megatron-LM PYTHON=/path/to/venv/bin/python \
 | `MEGATRON_MUSA_PATCH_IGNORE_VERSION_GATES` | 空 | `1`/`true`/`*` 放行所有版本门控；包名列表只放行指定包。不会绕过能力探针和补丁选择。 |
 | `MEGATRON_MUSA_PATCH_ROPE_FUSION` | `1` | 设为 `0` 拒绝 apex 融合 RoPE 回退，上游会继续报告 `apply_rope_fusion` 不可用。 |
 | `MEGATRON_MUSA_PATCH_JIT_WARMUP` | `0` | 设为 `1` 保留上游的 JIT 预热。 |
-| `MEGATRON_MUSA_PATCH_CKPT_FORK` | `0` | 设为 `1` 保留上游的 fork 式 checkpoint writer。 |
 | `MEGATRON_MUSA_PATCH_DP_OVERLAP` | `0` | 设为 `1` 恢复 DP-overlap 开关（旧写法 `MEGATRON_MUSA_PATCH_TP_OVERLAP` 在本变量未设置时生效）。 |
 | `MEGATRON_MUSA_PATCH_TEARDOWN` | `1` | 设为 `0` 跳过进程组清理钩子。 |
 

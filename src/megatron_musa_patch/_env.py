@@ -38,8 +38,6 @@ Variable                           Meaning                               Default
                                    "apply_rope_fusion is not available"
                                    verdict.
 ``..._JIT_WARMUP``                 ``1`` keeps upstream's JIT warm-up.   ``0``
-``..._CKPT_FORK``                  ``1`` keeps upstream's forked         ``0``
-                                   checkpoint writer.
 ``..._DP_OVERLAP``                 ``1`` honours the DP-overlap flags    ``0``
                                    again (legacy spelling
                                    ``..._TP_OVERLAP`` applies when

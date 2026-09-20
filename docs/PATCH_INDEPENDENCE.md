@@ -19,7 +19,7 @@
 | `_layer_norm.py` | standalone norm、flags、block norm、TE norm-linear | block norm 可自行构造 PyTorch 回退；TE norm-linear 不依赖 standalone/block 补丁；两个 flags 必须在 local class 补丁成功后生效。 |
 | `_rope.py` | sbhd/thd kernel、dispatcher 回退 | 三条分别可选，dispatcher 在调用时识别当前绑定的 apex kernel，不依赖注册顺序。不修改共享模型配置；原生 TE kernel 不触发 apex 探测。单独 kernel 不提供 dispatcher 的 interleaved/CP 回退。 |
 | `_training.py` | profile、DP overlap、legacy loader、两处 JIT helper | 每条可单独选择；profile/overlap 共用目标但处理不同字段，正反注册顺序均验证。JIT 定义处与已导入的别名分别拥有绑定；正常 Python 导入仍会继承定义处的当前值。 |
-| `_checkpointing.py` | DCP staging 设备选择与 checkpoint bucket 串行写入 | 独立于控制面屏障，保留上游结果协议和格式。外层 async caller 的 fork 不在该补丁覆盖内。 |
+| `_checkpointing.py` | DCP staging 的设备选择 | 只拥有 DCP 的设备选择器，独立于控制面屏障；不改上游 writer、结果协议和 checkpoint 格式。 |
 | `_control_collectives.py` | 启动时间同步、checkpoint host barrier、signal aliases | 启动时间和 signal 别名独立。host barrier 必须由 proxy/context 协作，context 显式依赖 proxy；只装 proxy 不重定向 barrier，也不创建组。 |
 
 补丁模块不互相 import；共享机制放在 engine/backend 层。共同的平台前提、同目标 wrapper

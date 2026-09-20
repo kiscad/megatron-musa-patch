@@ -150,7 +150,6 @@ On a MUSA PyTorch build `torch.cuda` is a dead shell (no `_cuda_*` bindings) and
 | `megatron.legacy.fused-kernels.load.noop` | `legacy.fused_kernels:load` | the loader probes `nvcc`/defines an extension builder — no MUSA build route |
 | `megatron.training.set-jit-fusion-options.noop` (+ `initialize` alias) | `set_jit_fusion_options` | startup CUDA warm-up/compile path needs validation on MUSA; skipped until proven |
 | `megatron.dist-ckpt.musa-cpu-staging` | DCP filesystem device selector (Megatron hook) | use the actual MUSA stream device under CUDA API emulation so CPU staging is not skipped; preserve upstream asynchronous copies, synchronization and checkpoint sharding |
-| `megatron.dist-ckpt.no-fork-writer` | `FileSystemWriterAsync.write_preloaded_data_multiproc` | forked bucket workers segfaulted in `torch.save` after MUSA init and hung the parent; write the same buckets sequentially in-process |
 | `megatron.training.overlap-flags.noop` | `training.arguments:validate_args` | the observed TE fused-wgrad/DDP integration left `param.grad` None, breaking Megatron's overlap backward hook; DP-overlap flags are forced off with a warning |
 | `megatron.training.profile.pytorch` | `training.arguments:validate_args` | bare `--profile` enters `cudaProfilerStart/Stop`/NVTX, which the MUSA runtime does not provide; `--use-pytorch-profiler` is enabled instead |
 | `megatron.training.start-time.integer-microseconds` | `training:torch` | Module-local startup timestamp MIN uses integer microseconds on MCCL |
@@ -174,7 +173,6 @@ pass-through wrapper when no apex kernel is installed. See the full
 [patch independence review](docs/PATCH_INDEPENDENCE.md).
 
 * `torch.cuda.is_available()` is a live MUSA probe, not a constant — but upstream also uses it as an *"am I on NVIDIA?"* probe in a few places (e.g. the FP8 checkpoint path gates its TransformerEngine import on it); review those if you enable FP8 checkpoints.
-* Checkpoint bucket writes are serialised in-process (a throughput trade, not a format change). `MEGATRON_MUSA_PATCH_CKPT_FORK=1` restores upstream's forked writer if your MUSA build survives fork-after-init. Megatron's outer async-save path (`async_utils.DynamicAsyncCaller`) still forks independently of this patch.
 * DP-overlap flags (`--overlap-grad-reduce` / `--overlap-param-gather`) are disabled by the fused-wgrad/DDP integration policy, which may reduce throughput. `MEGATRON_MUSA_PATCH_DP_OVERLAP=1` restores upstream behaviour for testing (legacy spelling `MEGATRON_MUSA_PATCH_TP_OVERLAP` still works). This does not touch `tp_comm_overlap`.
 * Bare `--profile` automatically enables `--use-pytorch-profiler` and warns on rank 0. Skip `megatron.training.profile.pytorch` with `MEGATRON_MUSA_PATCH_DISABLE` to restore upstream profiler selection.
 * Rope fusion is a MUSA kernel choice, not upstream's: the fused kernels come from Moore Threads' apex, and only the combinations apex implements are fused. `rotary_interleaved` models and packed sequences under context parallel are demoted to Megatron's unfused rotary embedding with a one-time warning — correct, slower, and no longer fatal. `MEGATRON_MUSA_PATCH_ROPE_FUSION=0` declines the fallback entirely, which leaves upstream's `apply_rope_fusion is not available` error in place (then pass `--no-rope-fusion`).
@@ -206,7 +204,6 @@ All three channels are idempotent. Automatic activation and explicit import regi
 | `MEGATRON_MUSA_PATCH_IGNORE_VERSION_GATES` | *(empty)* | `1`/`true`/`*` bypasses all version gates; a comma-separated distribution list bypasses only those gates. Capability probes and patch selection still apply. |
 | `MEGATRON_MUSA_PATCH_ROPE_FUSION` | `1` | `0` declines the apex fused-RoPE fallback, so upstream keeps reporting `apply_rope_fusion` as unavailable. |
 | `MEGATRON_MUSA_PATCH_JIT_WARMUP` | `0` | `1` keeps upstream's JIT warm-up. |
-| `MEGATRON_MUSA_PATCH_CKPT_FORK` | `0` | `1` keeps upstream's forked checkpoint writer. |
 | `MEGATRON_MUSA_PATCH_DP_OVERLAP` | `0` | `1` honours the DP-overlap flags again (legacy spelling `MEGATRON_MUSA_PATCH_TP_OVERLAP` applies when this is unset). |
 | `MEGATRON_MUSA_PATCH_TEARDOWN` | `1` | `0` skips the clean process-group shutdown handler. |
 
