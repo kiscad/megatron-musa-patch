@@ -322,8 +322,13 @@ def _te_norm_unfused(original: Any) -> Any:
 
         _megatron_musa_patch_fallback = True
 
-        def __new__(cls, config, hidden_size, eps: float = 1e-5):
+        def __new__(cls, config, hidden_size, eps: float = 1e-5, has_residual: bool = False):
             normalization = getattr(config, "normalization", "LayerNorm")
+            if getattr(config, "fused_residual_rmsnorm", False) and has_residual:
+                # core 0.19's fused residual RMSNorm is a different TE module with
+                # its own forward contract. This fallback does not emulate it, so
+                # build upstream's choice and report whatever the installed TE does.
+                return original(config, hidden_size, eps, has_residual)
             if normalization == "LayerNorm":
                 return layernorm_fallback(config, hidden_size, eps)
             if normalization == "RMSNorm":

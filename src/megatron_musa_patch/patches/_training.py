@@ -123,7 +123,9 @@ def _noop_set_jit_fusion_options(original: Any) -> Any:
         return None
 
     @functools.wraps(original)
-    def set_jit_fusion_options():
+    def set_jit_fusion_options(*args, **kwargs):
+        # Upstream's signature keeps changing (core 0.19 added tp_size); a no-op
+        # can accept every call shape without changing behaviour.
         return None
 
     return set_jit_fusion_options

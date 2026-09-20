@@ -179,5 +179,10 @@ def test_jit_warmup_policy_is_optional(monkeypatch):
     monkeypatch.delenv("MEGATRON_MUSA_PATCH_JIT_WARMUP", raising=False)
     assert _training._noop_set_jit_fusion_options(original)() is None
     original.assert_not_called()
+    # core 0.19 calls it as set_jit_fusion_options(tp_size=...); a no-op must
+    # accept every upstream call shape instead of raising TypeError.
+    assert _training._noop_set_jit_fusion_options(original)(tp_size=8) is None
+    assert _training._noop_set_jit_fusion_options(original)(8) is None
+    original.assert_not_called()
     monkeypatch.setenv("MEGATRON_MUSA_PATCH_JIT_WARMUP", "1")
     assert _training._noop_set_jit_fusion_options(original) is None

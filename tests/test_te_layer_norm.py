@@ -108,6 +108,64 @@ def test_rmsnorm_constructs_original_fused_module(stub_module, monkeypatch, zero
     assert module(x) is x
 
 
+def _te_norm_env(stub_module, monkeypatch, normalization="LayerNorm", fused_residual=False):
+    """Stub TE and the extension module, then build the TENorm stand-in."""
+
+    class Norm(torch.nn.Module):
+        def __init__(self, hidden_size, eps=1e-5, **kwargs):
+            super().__init__()
+            self.weight = torch.nn.Parameter(torch.ones(hidden_size))
+            self.bias = torch.nn.Parameter(torch.zeros(hidden_size))
+            self.eps = eps
+
+    stub_module("transformer_engine", pytorch=SimpleNamespace(LayerNorm=Norm, RMSNorm=Norm))
+    stub_module("megatron.core.extensions.transformer_engine", HAVE_TE=True)
+    monkeypatch.setattr(_layer_norm, "_musa_live", lambda: True)
+
+    upstream_calls = []
+
+    def original(*args, **kwargs):
+        upstream_calls.append((args, kwargs))
+        return "upstream-norm"
+
+    config = SimpleNamespace(
+        normalization=normalization,
+        sequence_parallel=False,
+        layernorm_zero_centered_gamma=False,
+        fused_residual_rmsnorm=fused_residual,
+    )
+    return _layer_norm._te_norm_unfused(original), config, upstream_calls
+
+
+@pytest.mark.parametrize("normalization", ["LayerNorm", "RMSNorm"])
+def test_te_norm_accepts_has_residual(stub_module, monkeypatch, normalization):
+    """core 0.19 builds TENorm with has_residual; the stand-in must take it.
+
+    Without it every TransformerLayer construction died with
+    ``TENormMusa.__new__() got an unexpected keyword argument 'has_residual'``.
+    """
+    patched, config, upstream_calls = _te_norm_env(stub_module, monkeypatch, normalization)
+
+    built = patched(config, 8, 1e-5, has_residual=True)
+
+    assert getattr(built, "_megatron_musa_patch_fallback", False) is True
+    assert upstream_calls == []  # fused residual is off: the fallback owns this path
+    assert patched(config, 8) is not None  # the 0.16-era call shape still works
+
+
+def test_te_norm_delegates_fused_residual_to_upstream(stub_module, monkeypatch):
+    """The fallback does not emulate TEFusedResidualRMSNorm, so upstream builds it."""
+    patched, config, upstream_calls = _te_norm_env(
+        stub_module, monkeypatch, "RMSNorm", fused_residual=True
+    )
+
+    assert patched(config, 8, 1e-5, has_residual=True) == "upstream-norm"
+    assert upstream_calls == [((config, 8, 1e-5, True), {})]
+
+    # Only the fused-residual combination delegates; a plain norm stays local.
+    assert patched(config, 8, 1e-5, has_residual=False) != "upstream-norm"
+
+
 def test_te_norm_linear_opt_out(monkeypatch):
     monkeypatch.setenv("MEGATRON_MUSA_PATCH_TE_FUSED_LAYERNORM", "1")
     assert _layer_norm._unfused_te_layer_norm_linear(object()) is None
