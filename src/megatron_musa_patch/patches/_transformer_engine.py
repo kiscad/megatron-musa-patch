@@ -314,8 +314,9 @@ def _cpu_offload_context_by_signature(original: Any) -> Any:
     real API disagree is called with the wrong argument count:
     ``TransformerBlock.__init__`` -- which calls this unconditionally -- raises
     ``TypeError: ... takes from 0 to 5 positional arguments but 6 were given``
-    before the model is built.  Dispatch on the installed function's real
-    signature instead; leave upstream alone when it is already right.
+    (7 on core 0.19) before the model is built.  Dispatch on the installed
+    function's real signature instead; leave upstream alone when it is already
+    right.
     """
     import inspect
 
@@ -340,9 +341,24 @@ def _cpu_offload_context_by_signature(original: Any) -> Any:
         model_layers,
         activation_offloading,
         weight_offloading,
-        double_buffering,
+        *offload_tuning,
     ):
-        """Get CPU offload context and sync function (five-argument TE)."""
+        """Get CPU offload context and sync function (five-argument TE).
+
+        Megatron's own wrapper keeps growing offload-tuning arguments the
+        installed fork does not take: ``double_buffering`` (core 0.16) and
+        ``retain_pinned_cpu_buffers`` (core 0.19). Accept whatever the caller
+        passes so ``TransformerBlock.__init__`` survives, and forward only the
+        five arguments TE implements. The extras tune a staging path this fork
+        does not provide, so they are dropped, not emulated.
+        """
+        if enabled and any(offload_tuning):
+            logger.warning(
+                "megatron-musa-patch: the installed Transformer Engine's "
+                "get_cpu_offload_context takes five arguments; ignoring the "
+                "offload tuning options %r requested by this Megatron release",
+                offload_tuning,
+            )
         return target(enabled, num_layers, model_layers, activation_offloading, weight_offloading)
 
     return get_cpu_offload_context
@@ -445,27 +461,34 @@ PATCHES = (
             "following NVIDIA's API timeline, so its reported version can select "
             "the six-argument call while "
             "transformer_engine.pytorch.cpu_offload.get_cpu_offload_context still "
-            "takes five arguments (no double_buffering); every run that builds a "
-            "TransformerBlock then dies with 'takes from 0 to 5 positional "
-            "arguments but 6 were given' before the model exists -- on a path that "
-            "never touches CPU offloading. Observed on the MT fork of TE 2.0.0 "
-            "with Megatron core_v0.16.1."
+            "takes five arguments (no double_buffering, no "
+            "retain_pinned_cpu_buffers); every run that builds a TransformerBlock "
+            "then dies with 'takes from 0 to 5 positional arguments but 6 were "
+            "given' before the model exists -- on a path that never touches CPU "
+            "offloading. Observed on the MT fork of TE 2.0.0 with Megatron "
+            "core_v0.16.1 (6 arguments) and core_v0.19.0 (7 arguments: 925 of "
+            "1816 unit-test failures in the 2026-09-18 sweep)."
         ),
         strategy=(
-            "Keep Megatron's public six-argument wrapper and call the installed TE "
-            "function with the five arguments it accepts, chosen by inspecting that "
-            "function's own signature instead of a version number. Declines when the "
-            "installed function takes six arguments (upstream's choice is then correct) "
-            "or when its arity is anything else, so the patch never guesses."
+            "Accept the offload-tuning arguments any Megatron release passes and "
+            "call the installed TE function with the five arguments it accepts, "
+            "chosen by inspecting that function's own signature instead of a version "
+            "number. The dropped tuning options (double_buffering, "
+            "retain_pinned_cpu_buffers) only tune a staging path this fork does not "
+            "implement; a warning is logged if offloading is actually enabled and one "
+            "was requested. Declines when the installed function takes six arguments "
+            "(upstream's choice is then correct) or when its arity is anything else, "
+            "so the patch never guesses."
         ),
         upstream=(
             "NVIDIA/Megatron-LM megatron/core/extensions/transformer_engine.py:"
             "get_cpu_offload_context"
         ),
         remove_when=(
-            "Remove once the MUSA Transformer Engine exposes the double_buffering "
-            "argument, after a pretrain run with CPU offloading enabled and disabled "
-            "has been re-validated on MUSA."
+            "Remove once the MUSA Transformer Engine's get_cpu_offload_context "
+            "accepts the same arguments as the Megatron release in use, after a "
+            "pretrain run with CPU offloading enabled and disabled has been "
+            "re-validated on MUSA."
         ),
     ),
     HookPatch(

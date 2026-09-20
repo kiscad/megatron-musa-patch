@@ -162,6 +162,31 @@ def _upstream_wrapper(target):
     return get_cpu_offload_context
 
 
+def _upstream_wrapper_0_19(target):
+    """Megatron core 0.19's wrapper: double_buffering plus retain_pinned_cpu_buffers."""
+
+    def get_cpu_offload_context(
+        enabled,
+        num_layers,
+        model_layers,
+        activation_offloading,
+        weight_offloading,
+        double_buffering,
+        retain_pinned_cpu_buffers,
+    ):
+        return target(
+            enabled,
+            num_layers,
+            model_layers,
+            activation_offloading,
+            weight_offloading,
+            double_buffering,
+            retain_pinned_cpu_buffers,
+        )
+
+    return get_cpu_offload_context
+
+
 def test_cpu_offload_context_uses_the_fork_signature(engine, stub_module):
     fork = TeFork(arity=5)
     upstream = _upstream_wrapper(fork.target)
@@ -176,6 +201,43 @@ def test_cpu_offload_context_uses_the_fork_signature(engine, stub_module):
     assert engine.report()[0]["status"] == "applied"
     assert module.get_cpu_offload_context(True, 4, 4, True, False, True) == "five"
     assert fork.calls == [(True, 4, 4, True, False)]
+
+
+def test_cpu_offload_context_accepts_the_seven_argument_caller(engine, stub_module):
+    """Megatron 0.19 passes retain_pinned_cpu_buffers as well; TE still takes five."""
+    fork = TeFork(arity=5)
+    module = stub_module(
+        "megatron.core.extensions.transformer_engine",
+        _get_cpu_offload_context=fork.target,
+        get_cpu_offload_context=_upstream_wrapper_0_19(fork.target),
+    )
+    engine.register([_cpu_offload_patch()])
+    engine.install()
+
+    assert engine.report()[0]["status"] == "applied"
+    assert module.get_cpu_offload_context(False, 4, 4, True, False, True, True) == "five"
+    assert fork.calls == [(False, 4, 4, True, False)]
+
+
+def test_cpu_offload_context_warns_when_dropping_requested_tuning(engine, stub_module, caplog):
+    fork = TeFork(arity=5)
+    module = stub_module(
+        "megatron.core.extensions.transformer_engine",
+        _get_cpu_offload_context=fork.target,
+        get_cpu_offload_context=_upstream_wrapper_0_19(fork.target),
+    )
+    engine.register([_cpu_offload_patch()])
+    engine.install()
+
+    with caplog.at_level("WARNING", logger="megatron_musa_patch"):
+        assert module.get_cpu_offload_context(True, 4, 4, True, False, True, False) == "five"
+    assert "offload tuning options" in caplog.text
+
+    # Offloading off: upstream's defaults are irrelevant, so stay quiet.
+    caplog.clear()
+    with caplog.at_level("WARNING", logger="megatron_musa_patch"):
+        module.get_cpu_offload_context(False, 4, 4, True, False, True, True)
+    assert caplog.text == ""
 
 
 def test_cpu_offload_context_leaves_a_six_argument_fork_alone(engine, stub_module):
