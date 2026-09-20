@@ -215,7 +215,18 @@ def _unfused_where_apex_cannot_fuse(original: Any) -> Any:
         return None
 
     @functools.wraps(original)
-    def apply_rotary_pos_emb(t, freqs, config, cu_seqlens=None, mscale: float = 1.0, cp_group=None):
+    def apply_rotary_pos_emb(
+        t,
+        freqs,
+        config,
+        cu_seqlens=None,
+        mscale: float = 1.0,
+        cp_group=None,
+        **passthrough,
+    ):
+        # Newer Megatron releases add keyword arguments to this call (core 0.19:
+        # mla_rotary_interleaved). Only the fusion decision belongs to this
+        # wrapper, so forward everything else to upstream untouched.
         reason = ""
         if config.apply_rope_fusion:
             reason = _unfusable_reason(
@@ -244,7 +255,13 @@ def _unfused_where_apex_cannot_fuse(original: Any) -> Any:
                     reason = "interleaved"
         if not reason:
             return original(
-                t, freqs, config=config, cu_seqlens=cu_seqlens, mscale=mscale, cp_group=cp_group
+                t,
+                freqs,
+                config=config,
+                cu_seqlens=cu_seqlens,
+                mscale=mscale,
+                cp_group=cp_group,
+                **passthrough,
             )
         _warn_once(
             reason,
@@ -259,7 +276,13 @@ def _unfused_where_apex_cannot_fuse(original: Any) -> Any:
         local_config = copy(config)
         local_config.apply_rope_fusion = False
         return original(
-            t, freqs, config=local_config, cu_seqlens=cu_seqlens, mscale=mscale, cp_group=cp_group
+            t,
+            freqs,
+            config=local_config,
+            cu_seqlens=cu_seqlens,
+            mscale=mscale,
+            cp_group=cp_group,
+            **passthrough,
         )
 
     return apply_rotary_pos_emb

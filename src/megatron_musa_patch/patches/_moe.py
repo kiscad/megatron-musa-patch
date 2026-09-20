@@ -118,8 +118,17 @@ def _moe_permute_unfused(original: Any) -> Any:
 
     @functools.wraps(original)
     def permute(
-        tokens, routing_map, probs=None, num_out_tokens=None, fused=False, drop_and_pad=False
+        tokens,
+        routing_map,
+        probs=None,
+        num_out_tokens=None,
+        fused=False,
+        drop_and_pad=False,
+        **passthrough,
     ):
+        # Newer Megatron releases add keyword arguments to this call (core 0.19:
+        # tokens_per_expert, align_size). They belong to upstream's own implementation,
+        # which this wrapper only re-dispatches, so forward them untouched.
         demote = fused and _fused_permute_unsupported(tokens)
         if demote:
             logger.debug(
@@ -134,6 +143,7 @@ def _moe_permute_unfused(original: Any) -> Any:
             num_out_tokens=num_out_tokens,
             fused=False if demote else fused,
             drop_and_pad=drop_and_pad,
+            **passthrough,
         )
 
     return permute
@@ -151,7 +161,11 @@ def _moe_unpermute_unfused(original: Any) -> Any:
         routing_map=None,
         fused=False,
         drop_and_pad=False,
+        **passthrough,
     ):
+        # Newer Megatron releases add keyword arguments to this call (core 0.19:
+        # pad_offsets). They belong to upstream's own implementation,
+        # which this wrapper only re-dispatches, so forward them untouched.
         demote = fused and _fused_permute_unsupported(permuted_tokens)
         if demote:
             logger.debug("MoE unpermute unfused fallback: dtype=%s", permuted_tokens.dtype)
@@ -163,6 +177,7 @@ def _moe_unpermute_unfused(original: Any) -> Any:
             routing_map=routing_map,
             fused=False if demote else fused,
             drop_and_pad=drop_and_pad,
+            **passthrough,
         )
 
     return unpermute

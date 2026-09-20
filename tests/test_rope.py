@@ -179,6 +179,29 @@ def test_interleaved_configs_are_demoted_and_the_flag_is_restored(engine, stub_m
     assert config.apply_rope_fusion is True  # ... and the config is untouched afterwards
 
 
+def test_newer_keyword_arguments_reach_upstream(engine, stub_module):
+    """core 0.19 passes mla_rotary_interleaved; the dispatcher must forward it.
+
+    Without the pass-through every MLA/DSA/inference call died with
+    ``apply_rotary_pos_emb() got an unexpected keyword argument``.
+    """
+    seen = {}
+
+    def dispatch(t, freqs, config, cu_seqlens=None, mscale=1.0, cp_group=None, **kwargs):
+        seen.update(kwargs)
+        return "unfused-result"
+
+    _stub_apex(stub_module)
+    module = _rope_utils(stub_module, dispatch=dispatch)
+    engine.register(_rope.PATCHES)
+    engine.install()
+    config = SimpleNamespace(apply_rope_fusion=True, rotary_interleaved=True)
+
+    module.apply_rotary_pos_emb(object(), object(), config=config, mla_rotary_interleaved=True)
+
+    assert seen == {"mla_rotary_interleaved": True}
+
+
 def test_fusible_calls_stay_on_the_fused_path(engine, stub_module):
     calls = []
     module = _dispatcher(engine, stub_module, calls=calls)

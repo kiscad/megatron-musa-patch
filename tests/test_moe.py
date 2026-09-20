@@ -83,7 +83,15 @@ def _permute_env(stub_module, dtype_marker="fp32"):
     calls = []
 
     def original(
-        tokens, routing_map, probs=None, num_out_tokens=None, fused=False, drop_and_pad=False
+        tokens,
+        routing_map,
+        probs=None,
+        num_out_tokens=None,
+        fused=False,
+        drop_and_pad=False,
+        # core 0.19's own parameters, kept open so the wrapper's pass-through is
+        # checked against a current upstream signature.
+        **newer,
     ):
         calls.append(
             {
@@ -91,6 +99,7 @@ def _permute_env(stub_module, dtype_marker="fp32"):
                 "probs": probs,
                 "num_out_tokens": num_out_tokens,
                 "drop_and_pad": drop_and_pad,
+                **newer,
             }
         )
         return "permuted", None, "indices"
@@ -139,6 +148,23 @@ def test_permute_demotes_fused_for_broken_dtypes(stub_module):
     # an explicit fused=False never gets upgraded
     wrapped(Tensor("fp32"), routing_map, fused=False)
     assert calls[-1]["fused"] is False
+
+
+def test_permute_forwards_newer_keyword_arguments(stub_module):
+    """core 0.19 adds tokens_per_expert/align_size; they belong to upstream."""
+    wrapped, calls, Tensor = _permute_env(stub_module)
+
+    wrapped(
+        Tensor("fp32"),
+        "map",
+        fused=True,
+        tokens_per_expert="per-expert",
+        align_size=32,
+    )
+
+    assert calls[-1]["tokens_per_expert"] == "per-expert"
+    assert calls[-1]["align_size"] == 32
+    assert calls[-1]["fused"] is False  # the dtype demotion still applies
 
 
 def test_unpermute_requires_its_permute_companion(stub_module):
