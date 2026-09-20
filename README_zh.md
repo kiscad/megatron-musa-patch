@@ -109,6 +109,7 @@ MUSA 版 PyTorch 完全没有 `_cuda_*` 绑定，`torch.cuda` 是空壳，而 Me
 
 | id | 目标 | 根因（简述） |
 |---|---|---|
+| `python.typing.override.backport` | `typing.override`（Megatron hook） | Megatron 0.19 要求 Python ≥3.12 并在模块层 `from typing import override`；MUSA 轮子是 CPython 3.10 构建，`megatron.training` 直接 import 失败。改为发布 `typing_extensions` 的实现（PEP 698 只是标记，无运行时语义）|
 | `torch.cuda.compat-layer` | `torch.cuda` | MUSA 版没有 CUDA 绑定；torchada + 4 个覆盖：`is_available()` 实时探测、`Tensor.type()` CUDA 名字、`CUDAGraph` 别名、tensor 子类（如 TE `Float8Tensor`）的 `.musa()` 迁移修复 |
 | `torch.cuda.device-capability.nvidia-scale` | `torch.cuda.get_device_capability` | Megatron 拿 capability 和 NVIDIA 阈值比较（≥8 的 grouped-GEMM 门）；上报合成的 `8.3` |
 | `megatron.training.get-device-arch-version.nvidia-scale` | `megatron.training.utils:get_device_arch_version` | 同类比较，走 `device_properties().major` |

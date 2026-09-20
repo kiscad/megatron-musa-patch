@@ -117,6 +117,7 @@ On a MUSA PyTorch build `torch.cuda` is a dead shell (no `_cuda_*` bindings) and
 
 | id | target | root cause (short) |
 |---|---|---|
+| `python.typing.override.backport` | `typing.override` (Megatron hook) | Megatron 0.19 requires Python ≥3.12 and imports `typing.override` at module scope; the MUSA wheels are CPython 3.10 builds, so `megatron.training` fails to import. Publish the `typing_extensions` implementation (PEP 698 marker only, no runtime effect) |
 | `torch.cuda.compat-layer` | `torch.cuda` | no CUDA bindings on the MUSA build; torchada + four overrides: live `is_available()` probe, `Tensor.type()` CUDA names, `CUDAGraph` alias, `.musa()` transfer fix for tensor subclasses (e.g. TE `Float8Tensor`) |
 | `torch.cuda.device-capability.nvidia-scale` | `torch.cuda.get_device_capability` | Megatron compares capability against NVIDIA thresholds (≥8 grouped-GEMM gate); report a synthetic `8.3` |
 | `megatron.training.get-device-arch-version.nvidia-scale` | `megatron.training.utils:get_device_arch_version` | same comparison via `device_properties().major` |
