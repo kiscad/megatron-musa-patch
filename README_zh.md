@@ -84,9 +84,9 @@ export PYTHONPATH=/path/to/Megatron-LM
 pip install megatron-core==0.16.1
 ```
 
-方式 b) 是上层框架消费 [Megatron-Core](https://pypi.org/project/megatron-core/) 时的典型场景——例如 **ms-swift** 的 Megatron 训练（要求 `megatron-core>=0.16`）或 **Megatron Bridge 0.1–0.3**（对应 Megatron-Core 0.14–0.16）。此时只有 `megatron.core` / `torch` 侧的 patch 会生效；`megatron.training` / `megatron.legacy` 的 patch 会被记录为 `skipped`，属预期行为。**Megatron Bridge ≥ 0.4 需要 Megatron-Core 0.17+**，超出本包支持范围。
+方式 b) 是上层框架消费 [Megatron-Core](https://pypi.org/project/megatron-core/) 时的典型场景——例如 **ms-swift** 的 Megatron 训练（要求 `megatron-core>=0.16`）或 **Megatron Bridge 0.1–0.3**（对应 Megatron-Core 0.14–0.16）。此时只有 `megatron.core` / `torch` 侧的 patch 会生效；`megatron.training` / `megatron.legacy` 的 patch 会被记录为 `skipped`，属预期行为。**Megatron Bridge ≥ 0.4 需要 Megatron-Core 0.17+**；本分支面向 0.19，0.17/0.18 这一段落在两个支持范围之间。
 
-本包刻意不把 Megatron 声明成 pip 依赖：wheel 只含 `megatron/core/`，PyPI 上也没有 `megatron-lm`，而真实用法需要锁定到某个 tag 的源码 checkout。支持的上游范围：`>=0.14,<0.17`——超出会告警（设 `MEGATRON_MUSA_PATCH_STRICT=1` 则报错）。
+本包刻意不把 Megatron 声明成 pip 依赖：wheel 只含 `megatron/core/`，PyPI 上也没有 `megatron-lm`，而真实用法需要锁定到某个 tag 的源码 checkout。支持的上游范围：`>=0.19,<0.20`——超出会告警（设 `MEGATRON_MUSA_PATCH_STRICT=1` 则报错）。0.14–0.16 一线由 `v0.16.1-dev` 分支维护。
 
 ## 保守调试参数
 
@@ -232,7 +232,7 @@ MEGATRON_MUSA_RUN_INTEGRATION=1 MEGATRON_LM_PATH=/path/to/Megatron-LM \
 
 ## 已验证组合
 
-以下是已有文档记录的参考环境，不是完整测试矩阵。声明的上游范围（`>=0.14,<0.17`）只是版本守卫，不能证明所有版本、功能或框架均已通过。每次验证都应记录实际 revision、命令、通过/失败/跳过数量及未测路径。
+以下是已有文档记录的参考环境，不是完整测试矩阵。声明的上游范围（`>=0.19,<0.20`）只是版本守卫，不能证明所有版本、功能或框架均已通过。每次验证都应记录实际 revision、命令、通过/失败/跳过数量及未测路径。
 
 Python 3.10 · PyTorch 2.7.1a0（MUSA 版）· torch_musa 2.7.1 · torchada 0.1.86 · Megatron-LM `core_v0.16.1`（megatron-core 0.16.1）· MT-TransformerEngine 2.0.0 · apex（MT fork，融合 RoPE）· MTT S5000。
 

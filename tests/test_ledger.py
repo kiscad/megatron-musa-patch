@@ -127,16 +127,25 @@ def test_parse_version(text, expected):
     assert parse_version(text) == expected
 
 
-def test_supported_version_spec_bounds_are_enforced():
-    assert parse_version("0.14.0") == (0, 14, 0)
-    assert parse_version("0.16.1rc0") == (0, 16, 1)
+def test_supported_version_spec_is_the_only_source_of_the_bounds():
+    """The guard must follow the declared spec, not a second hard-coded copy."""
     lo, _, hi = SUPPORTED_VERSION_SPEC.partition(",")
-    assert parse_version(lo.lstrip(">=")) >= (0, 14)
-    assert parse_version(hi.lstrip("<")) == (0, 17)
-    assert _compat._in_supported_range((0, 14)) and _compat._in_supported_range((0, 16, 1))
-    assert not _compat._in_supported_range((0, 13, 9)) and not _compat._in_supported_range(
-        (0, 17, 0)
-    )
+    low = parse_version(lo.lstrip(">="))
+    high = parse_version(hi.lstrip("<"))
+    assert low and high and low < high
+
+    assert _compat._in_supported_range(low)
+    assert _compat._in_supported_range(low + (1,))
+    assert not _compat._in_supported_range(high)
+    assert not _compat._in_supported_range((low[0], low[1] - 1, 9))
+    # An unknown release is not blocked here; check_version warns instead.
+    assert _compat._in_supported_range(())
+
+
+def test_release_comparison_zero_pads_like_the_gates():
+    assert _compat._release_satisfies((2, 0), "==", (2, 0, 0))
+    assert _compat._release_satisfies((0, 19), ">=", (0, 19))
+    assert not _compat._release_satisfies((0, 19, 1), "<", (0, 19))
 
 
 def test_version_drift_warns_or_raises_per_strict_switch(monkeypatch, caplog):

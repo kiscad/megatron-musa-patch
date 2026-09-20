@@ -51,7 +51,7 @@ META_PATH_WATCHER_MARKER = "__megatron_musa_patch_import_watcher__"
 #: The upstream range this patch set has been written against.  Only the
 #: symbols we actually touch matter, so a narrow-but-honest range is better
 #: than pretending to support everything.
-SUPPORTED_VERSION_SPEC = ">=0.14,<0.17"
+SUPPORTED_VERSION_SPEC = ">=0.19,<0.20"
 
 #: Distribution names that may carry an upstream Megatron-LM / Megatron-Core.
 _DISTRIBUTIONS = ("megatron-core", "megatron_core", "megatron-lm", "Megatron-LM")
@@ -102,9 +102,16 @@ def megatron_version() -> str | None:
 
 
 def _in_supported_range(version: tuple[int, ...]) -> bool:
+    """Evaluate a release against :data:`SUPPORTED_VERSION_SPEC`, its only source.
+
+    The spec is parsed with the same grammar and comparison rules as declarative
+    ``version_gates``, so the declared range cannot drift from the code enforcing
+    it.
+    """
     if not version:
         return True  # unknown -> do not block, just warn elsewhere
-    return (0, 14) <= version < (0, 17)
+    _, checks = parse_version_gate(f"megatron {SUPPORTED_VERSION_SPEC}")
+    return all(_release_satisfies(version, op, bound) for op, bound in checks)
 
 
 def check_version(*, strict: bool | None = None) -> str | None:
@@ -325,6 +332,14 @@ def require_attr(module: Any, dotted: str, *, patch_id: str = "<unknown>") -> An
 
 
 #: Comparison operators accepted in declarative version gates.
+def _release_satisfies(version: tuple[int, ...], op: str, bound: tuple[int, ...]) -> bool:
+    """Compare zero-padded numeric releases (``2.0`` equals ``2.0.0``)."""
+    width = max(len(version), len(bound))
+    return _GATE_OPS[op](
+        version + (0,) * (width - len(version)), bound + (0,) * (width - len(bound))
+    )
+
+
 _GATE_OPS = {
     ">=": lambda a, b: a >= b,
     ">": lambda a, b: a > b,
@@ -388,9 +403,6 @@ def check_version_gate(spec: str) -> tuple[bool, str]:
         return True, f"{name} has an unrecognized version {installed!r} (gate {spec})"
     version = tuple(map(int, match.group(1).split(".")))
     for op, bound in checks:
-        width = max(len(version), len(bound))
-        actual = version + (0,) * (width - len(version))
-        expected = bound + (0,) * (width - len(bound))
-        if not _GATE_OPS[op](actual, expected):
+        if not _release_satisfies(version, op, bound):
             return True, f"{name} {installed} outside declared range ({spec})"
     return False, f"{name} {installed} within {spec}"

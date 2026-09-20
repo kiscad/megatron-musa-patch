@@ -87,9 +87,9 @@ export PYTHONPATH=/path/to/Megatron-LM
 pip install megatron-core==0.16.1
 ```
 
-Option b) is the typical setup when [Megatron-Core](https://pypi.org/project/megatron-core/) is consumed through an upper-level framework — for example **ms-swift**'s Megatron training (`megatron-core>=0.16`) or **Megatron Bridge 0.1–0.3** (Megatron-Core 0.14–0.16). Only the `megatron.core` / `torch` patches apply there; the `megatron.training` / `megatron.legacy` patches are recorded as `skipped`, which is expected. **Megatron Bridge ≥ 0.4 needs Megatron-Core 0.17+**, outside this package's supported range.
+Option b) is the typical setup when [Megatron-Core](https://pypi.org/project/megatron-core/) is consumed through an upper-level framework — for example **ms-swift**'s Megatron training (`megatron-core>=0.16`) or **Megatron Bridge 0.1–0.3** (Megatron-Core 0.14–0.16). Only the `megatron.core` / `torch` patches apply there; the `megatron.training` / `megatron.legacy` patches are recorded as `skipped`, which is expected. **Megatron Bridge ≥ 0.4 needs Megatron-Core 0.17+**; this branch targets 0.19, so the 0.17/0.18 line falls between the two supported ranges.
 
-Megatron is deliberately not a pip dependency here: the wheel ships only `megatron/core/`, there is no `megatron-lm` on PyPI, and the real workflow wants a checkout pinned to a tag. Supported upstream range: `>=0.14,<0.17` — outside it you get a warning (an error with `MEGATRON_MUSA_PATCH_STRICT=1`).
+Megatron is deliberately not a pip dependency here: the wheel ships only `megatron/core/`, there is no `megatron-lm` on PyPI, and the real workflow wants a checkout pinned to a tag. Supported upstream range: `>=0.19,<0.20` — outside it you get a warning (an error with `MEGATRON_MUSA_PATCH_STRICT=1`). The 0.14–0.16 line is served by the `v0.16.1-dev` branch.
 
 ## Conservative bring-up flags
 
@@ -241,7 +241,7 @@ The package version tracks the Megatron-LM release it patches: `0.16.1.dev0` on 
 
 ## Verified against
 
-The recorded reference environment below is not an exhaustive test matrix. The declared upstream range (`>=0.14,<0.17`) is a version guard, not evidence that every version, feature or framework has passed. Report actual revisions, commands, pass/fail/skip counts and untested paths for each validation run.
+The recorded reference environment below is not an exhaustive test matrix. The declared upstream range (`>=0.19,<0.20`) is a version guard, not evidence that every version, feature or framework has passed. Report actual revisions, commands, pass/fail/skip counts and untested paths for each validation run.
 
 Python 3.10 · PyTorch 2.7.1a0 (MUSA build) · torch_musa 2.7.1 · torchada 0.1.86 · Megatron-LM `core_v0.16.1` (`megatron-core` 0.16.1) · MT-TransformerEngine 2.0.0 · apex (MT fork, fused RoPE) · MTT S5000.
 
