@@ -7,7 +7,7 @@
 
 | 模块 | 补丁职责 | 独立性与必要协作 |
 |---|---|---|
-| `_python_compat.py` | 解释器层 backport（`typing.override`） | 只拥有自己发布的 `typing` 绑定，不依赖任何其他补丁；已存在该属性时主动放弃。必须先于 Megatron 模块执行，否则上游 import 直接失败。 |
+| `_python_compat.py` | 解释器层 backport（`typing.override`、`typing.Concatenate`） | 只拥有自己发布的 `typing` 绑定，不依赖任何其他补丁；已存在该属性时主动放弃。必须先于 Megatron 模块执行，否则上游 import 直接失败。 |
 | `_torch_backend.py` / `backends/torch_cuda.py` | CUDA 名称的 MUSA 设备契约 | 平台前置，先于使用 CUDA API 的 Megatron 代码。torchada 的全局副作用不可撤销，本包仅撤销自己拥有的覆盖。 |
 | `_device_arch.py` | capability 与训练架构号 | 两条补丁分别可选，只共享同一环境配置的解析函数。capability hook 必须位于设备适配之后，才会修改最终 CUDA proxy。合成数值不代表硬件支持相应 NVIDIA kernel。 |
 | `_distributed.py` | 退出清理、FSDP 预缩放、subgroup backend 翻译 | 各自可选；卸载 atexit 回调不销毁运行中的进程组，通信代理只修改对应模块。 |

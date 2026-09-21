@@ -102,6 +102,92 @@ def test_undo_without_install_leaves_the_interpreter_alone(monkeypatch):
     assert typing.override is sentinel
 
 
+class _Rejecting:
+    """CPython 3.10's Concatenate: a trailing Ellipsis is a TypeError."""
+
+    def __init__(self):
+        self.calls = []
+
+    def __getitem__(self, parameters):
+        if isinstance(parameters, tuple) and parameters and parameters[-1] is Ellipsis:
+            raise TypeError("Concatenate[arg, ...]: each arg must be a type. Got Ellipsis.")
+        self.calls.append(parameters)
+        return ("concatenated", parameters)
+
+    marker = "stdlib"
+
+
+@pytest.fixture
+def rejecting_concatenate(monkeypatch):
+    original = _Rejecting()
+    monkeypatch.setattr(typing, "Concatenate", original, raising=False)
+    monkeypatch.setattr(_python_compat, "_owned", {})
+    yield original
+    _python_compat._owned.clear()
+
+
+def test_concatenate_accepts_the_trailing_ellipsis(rejecting_concatenate):
+    """The failure this patch exists for: annotations evaluated at import time."""
+    assert _python_compat._install_typing_concatenate() is None
+
+    result = typing.Concatenate[int, ...]
+
+    assert result[0] == "concatenated"
+    substituted = rejecting_concatenate.calls[-1]
+    assert substituted[0] is int
+    assert isinstance(substituted[-1], typing.ParamSpec), "Ellipsis becomes a ParamSpec"
+
+
+def test_concatenate_delegates_every_other_subscription(rejecting_concatenate):
+    _python_compat._install_typing_concatenate()
+    params = typing.ParamSpec("P")
+
+    typing.Concatenate[str, params]
+
+    assert rejecting_concatenate.calls[-1] == (str, params), "forwarded untouched"
+    assert typing.Concatenate.marker == "stdlib", "attribute access falls through"
+    assert repr(typing.Concatenate) == repr(rejecting_concatenate)
+
+
+def test_concatenate_declines_when_ellipsis_already_works(monkeypatch):
+    """CPython >= 3.11 needs nothing; the patch must not wrap it."""
+
+    class Accepting:
+        def __getitem__(self, parameters):
+            return parameters
+
+    accepting = Accepting()
+    monkeypatch.setattr(typing, "Concatenate", accepting, raising=False)
+    monkeypatch.setattr(_python_compat, "_owned", {})
+
+    assert _python_compat._install_typing_concatenate() is False
+    assert typing.Concatenate is accepting
+    assert _python_compat._owned == {}
+
+
+def test_concatenate_declines_without_the_special_form(monkeypatch):
+    monkeypatch.delattr(typing, "Concatenate", raising=False)
+    monkeypatch.setattr(_python_compat, "_owned", {})
+
+    assert _python_compat._install_typing_concatenate() is False
+    assert not hasattr(typing, "Concatenate")
+
+
+def test_concatenate_undo_restores_only_what_it_owns(rejecting_concatenate):
+    _python_compat._install_typing_concatenate()
+    _python_compat._uninstall_typing_concatenate()
+    assert typing.Concatenate is rejecting_concatenate
+
+    _python_compat._uninstall_typing_concatenate()  # idempotent
+    assert typing.Concatenate is rejecting_concatenate
+
+    _python_compat._install_typing_concatenate()
+    later = object()
+    typing.Concatenate = later
+    _python_compat._uninstall_typing_concatenate()
+    assert typing.Concatenate is later, "a later owner's binding is left alone"
+
+
 def test_hook_runs_before_the_trigger_module_executes(
     engine, fake_package, without_override, monkeypatch
 ):
