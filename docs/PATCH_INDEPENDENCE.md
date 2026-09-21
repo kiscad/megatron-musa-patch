@@ -15,6 +15,7 @@
 | `_attention.py` | 按能力选择 TE attention 后端 | 独立源码/输入探测；复用 TE 数学实现，不依赖 norm 或 MoE 补丁。 |
 | `_moe.py` | FP64 top-k、permute/unpermute 回退 | top-k 独立；unpermute 显式要求 permute。成对使用两项 permutation 补丁；单独启用 permute 不保证完整 dispatch/restore 链路。 |
 | `_grouped_gemm.py` | 逐专家 matmul 回退及可用性接口 | flag/assert 要求 ops；完整调用方还需要 availability flag，不能由只安装 ops 的结果推断整个 GroupedMLP 可用。 |
+| `_sort.py` | bool 键排序（四种拼写） | 单一 hook 原子持有四个绑定并整体 undo，缺的是同一个能力；只认 bool+MUSA 输入，其它 dtype/设备零介入，不依赖任何其它补丁。 |
 | `_softmax.py` | 扩展缺失时的融合可用性判断 | 独立选择，数学实现留给上游回退。 |
 | `_layer_norm.py` | standalone norm、flags、block norm、TE norm-linear | block norm 可自行构造 PyTorch 回退；TE norm-linear 不依赖 standalone/block 补丁；两个 flags 必须在 local class 补丁成功后生效。 |
 | `_rope.py` | sbhd/thd kernel、dispatcher 回退 | 三条分别可选，dispatcher 在调用时识别当前绑定的 apex kernel，不依赖注册顺序。不修改共享模型配置；原生 TE kernel 不触发 apex 探测。单独 kernel 不提供 dispatcher 的 interleaved/CP 回退。 |
