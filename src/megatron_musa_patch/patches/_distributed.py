@@ -241,4 +241,39 @@ PATCHES = (
             "subgroup cases with the patch disabled before deleting."
         ),
     ),
+    AttrPatch(
+        id="megatron.mimo-colocated-communicator.subgroups-backend",
+        target="megatron.core.models.mimo.comm.colocated_communicator:dist",
+        replace=_subgroups_distributed_proxy,
+        rationale=(
+            "ColocatedBridgeCommunicator builds its gather groups with "
+            "dist.new_subgroups_by_enumeration(ranks, backend='nccl') "
+            "(colocated_communicator.py:92 and :104) from its own module-level "
+            "torch.distributed global, which neither the bridge-communicator nor the "
+            "hyper-comm-grid proxy covers, so it hits the same c10d-internal new_group "
+            "bypass: 24 of the failing unit-test cases in the 2026-09-20 sweep "
+            "(models/mimo/test_mimo_colocated_communicator.py, "
+            "test_mimo_colocated_correctness.py) die with 'Distributed package doesn't "
+            "have NCCL built in'."
+        ),
+        strategy=(
+            "Bind this module's torch.distributed global to the same forwarding proxy "
+            "the other two use: only an exact 'nccl' backend request is translated to "
+            "'mccl' while a live MUSA runtime is present, and every other attribute, "
+            "argument and the (current_subgroup, subgroups) return contract forward "
+            "untouched. The communicator's own group bookkeeping and destroy() path are "
+            "unchanged."
+        ),
+        upstream=(
+            "NVIDIA/Megatron-LM megatron/core/models/mimo/comm/"
+            "colocated_communicator.py; pytorch torch/distributed/"
+            "distributed_c10d.py:new_subgroups_by_enumeration"
+        ),
+        remove_when=(
+            "Remove together with the other two subgroup-backend patches when torchada "
+            "or c10d translates this entry natively; re-run "
+            "models/mimo/test_mimo_colocated_communicator on MUSA with this patch "
+            "disabled and delete only if the unpatched path passes."
+        ),
+    ),
 )

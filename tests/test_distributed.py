@@ -184,11 +184,21 @@ def test_subgroups_proxy_forwards_everything_else():
         proxy.nonexistent  # noqa: B018 -- deliberate missing-attribute probe
 
 
-def test_subgroups_patches_target_the_megatron_callers():
+def test_subgroups_patches_target_every_megatron_caller():
+    """Each module that reaches the c10d bypass keeps its own dist global."""
     ids = {p.id: p for p in _distributed.PATCHES}
-    bridge = ids["megatron.bridge-communicator.subgroups-backend"]
-    grid = ids["megatron.hyper-comm-grid.subgroups-backend"]
-    assert bridge.target == "megatron.core.pipeline_parallel.bridge_communicator:dist"
-    assert grid.target == "megatron.core.hyper_comm_grid:dist"
-    assert bridge.rebind_prefixes == ("megatron",)
-    assert grid.rebind_prefixes == ("megatron",)
+    targets = {
+        "megatron.bridge-communicator.subgroups-backend": (
+            "megatron.core.pipeline_parallel.bridge_communicator:dist"
+        ),
+        "megatron.hyper-comm-grid.subgroups-backend": "megatron.core.hyper_comm_grid:dist",
+        "megatron.mimo-colocated-communicator.subgroups-backend": (
+            "megatron.core.models.mimo.comm.colocated_communicator:dist"
+        ),
+    }
+    for patch_id, target in targets.items():
+        patch = ids[patch_id]
+        assert patch.target == target
+        assert patch.rebind_prefixes == ("megatron",)
+        assert patch.replace is _distributed._subgroups_distributed_proxy, "one shared proxy"
+        assert patch.rationale and patch.strategy and patch.upstream and patch.remove_when

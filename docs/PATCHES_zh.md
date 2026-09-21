@@ -26,6 +26,7 @@
 | `megatron.fsdp.premul-sum.device-prescale` | `fsdp...param_and_grad_buffer:gradient_reduce_preprocessing` | torch_musa/MCCL 没有实现 PREMUL_SUM；FSDP 梯度平均在该分支设备端 `mul_` 预缩放后改用 SUM，其余分支透传 |
 | `megatron.bridge-communicator.subgroups-backend` | `pipeline_parallel.bridge_communicator:dist` | `new_subgroups_by_enumeration` 在 c10d 内部调用 `new_group`，绕开 torchada 的 nccl→mccl 翻译；在模块局部代理中仅翻译确切的 `nccl` 请求 |
 | `megatron.hyper-comm-grid.subgroups-backend` | `hyper_comm_grid:dist` | 与 bridge communicator 相同的绕行路径；同一代理，仅翻译 `nccl` |
+| `megatron.mimo-colocated-communicator.subgroups-backend` | `models.mimo.comm.colocated_communicator:dist` | 第三个模块全局上的同一条 c10d `new_group` 旁路（colocated_communicator.py:92、:104 的 `backend='nccl'`）；同一个代理，只翻译 `nccl` |
 | `megatron.te.grouped-linear.mem-monitor-compat` | `transformer_engine...grouped_linear.py` 的 `musa_patch` 导入 | MT-TE 硬依赖旧 `musa_patch.mem_utils.MemMonitor`；提供带 `max_token_num` 计数的最小 shim（拥有 sys.modules 条目，可撤销），不覆盖已有包 |
 | `megatron.moe.topk.fp64-reference` | `transformer.moe.moe_utils:torch` | MuDNN TopK 不支持 float64；moe_utils 的 torch 全局换成转发代理，仅对 FP64 topk 用 CPU 同精度求索引 + 设备端 gather |
 | `megatron.moe.permutation.unfused-musa` | `transformer.moe.moe_utils:permute` | TE 的 moe_permute 内核对 FP32/FP64 中止；仅在该组合降级到上游 `fused=False` 参考实现 |
