@@ -30,22 +30,48 @@ def test_every_patch_has_an_actionable_maintenance_record(patch):
         assert AppliedPatch(patch).as_dict()[field] == value
 
 
+#: AttrPatch scopes above Megatron, each a reviewed exception that names its
+#: target explicitly. ``megatron.`` remains the default for everything else.
+_NON_MEGATRON_SCOPES = {
+    # mcore-bridge's GDN forward re-imports fla's chunk_gated_delta_rule into
+    # its own namespace, so the MUSA kernel choice is unreachable through
+    # Megatron's binding alone on the path ms-swift's
+    # ``--bridge_backend mcore-bridge`` executes.
+    "mcore_bridge.ssm.gated-delta-rule.tilelang": "mcore_bridge",
+    # Direct TransformerEngine models (te.pytorch.TransformerLayer in the
+    # megatron-FSDP suite) construct these modules inside TE's own namespace;
+    # Megatron's wrapper patches cannot reach them.
+    "transformer_engine.layer-norm-linear.native-unfused": "transformer_engine",
+    "transformer_engine.layer-norm-mlp.native-unfused": "transformer_engine",
+}
+
+
 def test_targets_and_hooks_have_explicit_scope():
     for patch in PATCHES:
         if isinstance(patch, AttrPatch):
-            assert patch.module_name.startswith("megatron.")
+            scope = _NON_MEGATRON_SCOPES.get(patch.id, "megatron")
+            assert patch.module_name.startswith(scope + ".")
             assert ":" in patch.target
-            assert patch.rebind_prefixes == ("megatron",)
+            assert patch.rebind_prefixes == (scope,)
         else:
             # transformer_engine is the one sanctioned exception: MT-TE's
             # import-time factory shim breaks eager torch.jit.script before
             # any Megatron import (ms-swift's zigzag_ring_attn), so the guard
             # must activate at the TE boundary.
-            early_ids = {
-                "megatron.te.factory-shim.torchscript-compat",
-                "megatron.te.utils-module.safe-seed",
+            expected_triggers = {
+                # Direct-TE models (te.pytorch.TransformerLayer) may never
+                # import Megatron at all, and MT-TE's own __init__ resolves
+                # super() through its module global, so the capability
+                # dispatch must be installed in place at the musa TE
+                # boundary; the factory shim and safe-seed hooks must fire
+                # before any Megatron import.
+                "megatron.te.factory-shim.torchscript-compat": "transformer_engine",
+                "megatron.te.utils-module.safe-seed": "transformer_engine",
+                "transformer_engine.dot-product-attention.capability-dispatch": (
+                    "transformer_engine.musa.pytorch.attention"
+                ),
             }
-            expected = "transformer_engine" if patch.id in early_ids else "megatron"
+            expected = expected_triggers.get(patch.id, "megatron")
             assert patch.trigger == expected
             assert callable(patch.undo), f"{patch.id} must clean up owned changes"
 

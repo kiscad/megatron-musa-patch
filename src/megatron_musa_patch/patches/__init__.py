@@ -27,6 +27,7 @@ from . import (
     _python_compat,
     _rope,
     _softmax,
+    _ssm,
     _torch_backend,
     _training,
     _transformer_engine,
@@ -53,6 +54,7 @@ MODULES = (
     _training,
     _checkpointing,
     _control_collectives,
+    _ssm,
 )
 
 #: Same-target factories compose in registration order. Same-module companion

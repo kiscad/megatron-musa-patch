@@ -2,7 +2,7 @@
 # Run the upstream example with the previously local 16-layer / 1% schedule.
 # CLI overrides live here; upstream model/training code remains untouched.
 set -euo pipefail
-: "${MEGATRON_LM_PATH:?set MEGATRON_LM_PATH to the Megatron-LM checkout}"
+MEGATRON_LM_PATH="${MEGATRON_LM_PATH:-/ipfs/jingyuan/Megatron-LM-core_v0.19.0}"
 export MUSA_TRAIN_PYTHON="${PYTHON:-python}"
 export MUSA_NUM_LAYERS="${NUM_LAYERS:-16}"
 export MUSA_TRAIN_SAMPLES="${TRAIN_SAMPLES:-19531250}"

@@ -50,8 +50,8 @@
 # plus --dataloader-fast-cache-load to skip the barrier.
 set -euo pipefail
 
-MEGATRON_LM_PATH="${MEGATRON_LM_PATH:?set MEGATRON_LM_PATH to a Megatron-LM checkout (core_r0.16.x)}"
-PYTHON="${PYTHON:?set PYTHON to the venv interpreter that has torch_musa + torchada}"
+MEGATRON_LM_PATH="${MEGATRON_LM_PATH:-/ipfs/jingyuan/Megatron-LM-core_v0.19.0}"
+PYTHON="${PYTHON:-python}"
 # Use the venv's torchrun: a bare `torchrun` from PATH may hit another env.
 TORCHRUN="${TORCHRUN:-$PYTHON -m torch.distributed.run}"
 

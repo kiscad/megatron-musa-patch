@@ -22,6 +22,26 @@ from ..backends import musa_available as _musa_live
 __all__ = ["PATCHES"]
 
 
+def _te_norm_compute_dtype(torch, params_dtype):
+    """TE's effective norm dtype: ``maybe_autocast_dtype(default=weight.dtype)``.
+
+    TransformerEngine's basic norm ``op_forward`` resolves the compute dtype
+    from the *parameters* (or the autocast dtype when one is active) and casts
+    the *input* to it -- ``x = reshape(input_, ..., dtype=dtype)`` in
+    ``pytorch/ops/basic/layer_norm.py``. That contract is what absorbs a
+    mixed-dtype activation (e.g. a bf16 model fed the fp32 learned
+    position-embedding sum: ``torch.nn.Embedding`` defaults to fp32 while
+    ``VocabParallelEmbedding`` honors ``params_dtype``) before the next TE
+    linear asserts ``input.dtype == param.dtype``. Casting the other way --
+    parameters to the input's dtype -- leaks the wider dtype downstream
+    instead (observed as "Data types for parameters must match when outside of
+    autocasted region" in the a2a overlap suite).
+    """
+    if torch.is_autocast_enabled("cuda"):
+        return torch.get_autocast_dtype("cuda")
+    return params_dtype
+
+
 def _build_norm_fallback_class(base: Any = None, cast_to_input: bool = False) -> Any:
     """The functional LayerNorm/RMSNorm class shared by the norm patches.
 
@@ -156,6 +176,23 @@ def _unfused_te_layer_norm_linear(original: Any) -> Any:
     import torch
     from megatron.core.extensions.transformer_engine import TEColumnParallelLinear
 
+    # te.pytorch.LayerNormLinear must still accept this class in runtime
+    # isinstance checks (TEFusedMLP rejects an FC1 that is not a TE
+    # LayerNormLinear). Inheriting it as a second base is not an option: the
+    # MRO would route te.pytorch.Linear's super() into LayerNormLinear's
+    # constructor. Megatron's own class derives from it; this replacement
+    # registers as a virtual subclass of the *current* binding instead (TE
+    # modules are ABCs), which stays true whether that binding is upstream or
+    # this package's native-unfused subclass. Resolved defensively: CPU stub
+    # tests build this class without a usable real TE import.
+    te_layernorm_linear = None
+    try:
+        import transformer_engine as _te
+
+        te_layernorm_linear = getattr(getattr(_te, "pytorch", None), "LayerNormLinear", None)
+    except Exception:  # noqa: BLE001 - stubbed or broken TE skips registration
+        te_layernorm_linear = None
+
     class _NormLinearDispatchMeta(type(TEColumnParallelLinear)):
         def __instancecheck__(cls, instance):
             # Megatron's FP8 parameter gathering identifies column-parallel
@@ -222,9 +259,21 @@ def _unfused_te_layer_norm_linear(original: Any) -> Any:
                     parameter.allreduce = True
 
         def forward(self, x):
-            # TE casts norm inputs/parameters to the activation dtype. Under
-            # autocast x can differ from params_dtype; casts retain autograd.
-            weight = self.layer_norm_weight.to(x.dtype)
+            # TE's fused op chain normalizes in
+            # maybe_autocast_dtype(default=norm-weight dtype) and casts the
+            # input to it; the following linear therefore sees the parameter
+            # dtype outside autocast. Mirror that here so a mixed-dtype
+            # activation (fp32 position-embedding sum into a bf16 model) is
+            # absorbed at the norm exactly like the native kernel does.
+            dtype = _te_norm_compute_dtype(torch, self.layer_norm_weight.dtype)
+            if x.dtype != dtype:
+                x = x.to(dtype)
+            weight = self.layer_norm_weight
+            if dtype != weight.dtype:
+                weight = weight.to(dtype)
+            bias = self.layer_norm_bias
+            if bias is not None and dtype != bias.dtype:
+                bias = bias.to(dtype)
             weight = weight + 1 if self.zero_centered_gamma else weight
             if self.normalization == "RMSNorm":
                 normalized = torch.nn.functional.rms_norm(x, (x.shape[-1],), weight, self.eps)
@@ -233,7 +282,7 @@ def _unfused_te_layer_norm_linear(original: Any) -> Any:
                     x,
                     (x.shape[-1],),
                     weight,
-                    self.layer_norm_bias.to(x.dtype),
+                    bias,
                     self.eps,
                 )
             return super().forward(normalized)
@@ -247,7 +296,231 @@ def _unfused_te_layer_norm_linear(original: Any) -> Any:
     # consumers may rebind).
     _BASE_NORM_LINEAR = TELayerNormColumnParallelLinear
 
+    if isinstance(te_layernorm_linear, type) and hasattr(te_layernorm_linear, "register"):
+        te_layernorm_linear.register(TELayerNormColumnParallelLinear)
+
     return TELayerNormColumnParallelLinear
+
+
+def _te_native_module_eligible(self, inp) -> bool:
+    """Whether TE's fused norm module can be replaced by the functional path.
+
+    Only the plain path is claimed: a live MUSA device, no FP8 (weights or
+    calibration), no user-buffer overlap, no CPU offloading, no TP
+    communication (tp_size 1), no layernorm-output return and a supported
+    normalization. Everything else keeps the original TE forward so its own
+    errors surface.
+    """
+    import sys
+    import torch
+
+    if not _musa_live() or not torch.is_tensor(inp) or inp.device.type != "musa":
+        return False
+    if getattr(self, "fp8", False) or getattr(self, "fp8_calibration", False):
+        return False
+    if getattr(self, "tp_size", 1) > 1:
+        return False
+    if any(
+        getattr(self, name, False)
+        for name in (
+            "ub_overlap_ag_fprop",
+            "ub_overlap_rs_fprop",
+            "ub_overlap_ag_dgrad",
+            "ub_overlap_rs_dgrad",
+            "ub_bulk_wgrad",
+            "ub_bulk_dgrad",
+            "ub_overlap_ag",
+            "ub_overlap_rs",
+            "ub_overlap_rs_dgrad",
+        )
+    ):
+        return False
+    if getattr(self, "return_layernorm_output", False):
+        return False
+    offload = sys.modules.get("transformer_engine.pytorch.cpu_offload")
+    if offload is not None and offload.is_cpu_offload_enabled():
+        return False
+    if getattr(self, "normalization", "LayerNorm") not in ("LayerNorm", "RMSNorm"):
+        return False
+    return True
+
+
+def _te_plain_norm(self, x, activation_dtype):
+    """The module's normalization as a functional op, TE's dtype contract."""
+    import torch.nn.functional as F
+
+    def cast(t):
+        return t if t is None or t.dtype == activation_dtype else t.to(activation_dtype)
+
+    weight = cast(self.layer_norm_weight)
+    if getattr(self, "zero_centered_gamma", False):
+        weight = weight + 1
+    bias = cast(self.layer_norm_bias)
+    in_features = self.layer_norm_weight.numel()
+    if self.normalization == "LayerNorm":
+        return F.layer_norm(x, (in_features,), weight, bias, self.eps)
+    return F.rms_norm(x, (in_features,), weight, self.eps)
+
+
+def _te_plain_weight(self, name_base, activation_dtype):
+    """Concatenated (and cast) split parameters, mirroring the module's noop_cat."""
+    import sys
+    import torch
+
+    quantized = getattr(sys.modules.get("transformer_engine.pytorch.tensor"), "QuantizedTensor", ())
+    tensors = [getattr(self, name) for name in getattr(self, f"{name_base}_names")]
+    tensors = [t.dequantize() if isinstance(t, quantized) else t for t in tensors]
+    weight = tensors[0] if len(tensors) == 1 else torch.cat(tensors)
+    if weight.dtype != activation_dtype:
+        weight = weight.to(activation_dtype)
+    return weight
+
+
+def _te_plain_bias(self, activation_dtype):
+    """Concatenated bias parameters, or the unused placeholder like upstream."""
+
+    def cast(t):
+        return t if t is None or t.dtype == activation_dtype else t.to(activation_dtype)
+
+    if self.use_bias:
+        import torch
+
+        biases = [getattr(self, name) for name in self.bias_names]
+        return cast(biases[0] if len(biases) == 1 else torch.cat(biases))
+    return cast(getattr(self, self.bias_names[0]))
+
+
+def _unfused_te_native_layernorm_linear(original: Any) -> Any:
+    """Subclass te.pytorch.LayerNormLinear with a functional plain forward.
+
+    Direct TE models (``te.pytorch.TransformerLayer`` in the megatron-FSDP
+    suite) run the fused normalization through
+    ``module/_common.py:apply_normalization``, whose MUSA kernel aborts in
+    ``csrc/common.cpp allocateSpace``. The replacement subclasses the TE
+    module -- isinstance checks, parameters, checkpoint metadata and the
+    constructor stay TE's -- and only reroutes the *eligible* plain path
+    (see ``_te_native_module_eligible``) through functional normalization
+    plus ``F.linear``, so both forward and backward run on plain PyTorch ops.
+    """
+    if _env.flag("TE_FUSED_LAYERNORM", False) or not _musa_live():
+        return None
+
+    class LayerNormLinearUnfused(original):  # type: ignore[misc,valid-type]
+        _megatron_musa_patch_fallback = True
+
+        def forward(self, inp, is_first_microbatch=None, fp8_output=False):
+            if not _te_native_module_eligible(self, inp):
+                return original.forward(
+                    self, inp, is_first_microbatch=is_first_microbatch, fp8_output=fp8_output
+                )
+            import torch.nn.functional as F
+
+            with self.prepare_forward(inp, allow_non_contiguous=False) as x:
+                if x.dtype != self.activation_dtype:
+                    x = x.to(self.activation_dtype)
+                ln_out = _te_plain_norm(self, x, self.activation_dtype)
+                weight = _te_plain_weight(self, "weight", self.activation_dtype)
+                bias_tensor = _te_plain_bias(self, self.activation_dtype)
+                gemm_bias = (
+                    bias_tensor if self.apply_bias and not self.gemm_bias_unfused_add else None
+                )
+                out = F.linear(ln_out, weight, gemm_bias)
+            if self.gemm_bias_unfused_add:
+                out = out + bias_tensor
+            if self.return_bias:
+                return out, bias_tensor
+            return out
+
+    return LayerNormLinearUnfused
+
+
+def _unfused_te_native_layernorm_mlp(original: Any) -> Any:
+    """Subclass te.pytorch.LayerNormMLP with a functional plain forward.
+
+    Same fused-normalization failure and the same contract as the
+    LayerNormLinear replacement; the eligible path is norm -> fc1 -> gelu/relu
+    -> fc2 on plain PyTorch ops. Gated activations keep the original forward.
+    """
+    if _env.flag("TE_FUSED_LAYERNORM", False) or not _musa_live():
+        return None
+
+    class LayerNormMLPUnfused(original):  # type: ignore[misc,valid-type]
+        _megatron_musa_patch_fallback = True
+
+        def forward(self, inp, is_first_microbatch=None):
+            if not _te_native_module_eligible(self, inp):
+                return original.forward(self, inp, is_first_microbatch=is_first_microbatch)
+            if self.activation not in ("gelu", "relu"):
+                return original.forward(self, inp, is_first_microbatch=is_first_microbatch)
+            import torch.nn.functional as F
+
+            with self.prepare_forward(inp, num_gemms=2) as x:
+                if x.dtype != self.activation_dtype:
+                    x = x.to(self.activation_dtype)
+                ln_out = _te_plain_norm(self, x, self.activation_dtype)
+                fc1_weight = self.fc1_weight
+                fc2_weight = self.fc2_weight
+                if fc1_weight.dtype != self.activation_dtype:
+                    fc1_weight = fc1_weight.to(self.activation_dtype)
+                if fc2_weight.dtype != self.activation_dtype:
+                    fc2_weight = fc2_weight.to(self.activation_dtype)
+                fc1_bias = self.fc1_bias if self.use_bias else None
+                if fc1_bias is not None and fc1_bias.dtype != self.activation_dtype:
+                    fc1_bias = fc1_bias.to(self.activation_dtype)
+                fc2_bias = self.fc2_bias if self.use_bias else None
+                if fc2_bias is not None and fc2_bias.dtype != self.activation_dtype:
+                    fc2_bias = fc2_bias.to(self.activation_dtype)
+                fc1_out = F.linear(ln_out, fc1_weight, fc1_bias)
+                # TE fuses gelu into the GEMM; the tanh approximation matches
+                # tex.gelu's formula.
+                if self.activation == "gelu":
+                    act_out = F.gelu(fc1_out, approximate="tanh")
+                else:
+                    act_out = F.relu(fc1_out)
+                gemm2_bias = (
+                    fc2_bias if self.apply_bias and not self.gemm_bias_unfused_add else None
+                )
+                out = F.linear(act_out, fc2_weight, gemm2_bias)
+            if self.gemm_bias_unfused_add:
+                out = out + fc2_bias
+            if self.return_bias:
+                return out, fc2_bias
+            return out
+
+    return LayerNormMLPUnfused
+
+
+def _unfused_te_fused_mlp(original: Any) -> Any:
+    """Subclass Megatron's TEFusedMLP with the plain MLP decomposition.
+
+    TEFusedMLP runs its norm+fc1+activation+fc2 chain through TE's
+    operation-fuser (``BasicLayerNorm``/``BasicLinear`` ops), whose
+    normalization aborts in the same MUSA allocateSpace assertion as the
+    fused modules. The plain ``MLP.forward`` decomposition -- already used
+    everywhere else -- runs linear_fc1 (the unfused norm-linear replacement),
+    the functional activation and linear_fc2 on regular PyTorch ops.
+    """
+
+    if _env.flag("TE_FUSED_LAYERNORM", False) or not _musa_live():
+        return None
+    from megatron.core.transformer.mlp import MLP
+
+    class TEFusedMLPUnfused(original):  # type: ignore[misc,valid-type]
+        _megatron_musa_patch_fallback = True
+
+        def forward(self, hidden_states, **kwargs):
+            config = getattr(self, "config", None)
+            if config is not None and getattr(config, "fp8", False):
+                # FP8 needs TE's fused quantization; keep upstream so its own
+                # errors surface instead of silently changing precision.
+                return original.forward(self, hidden_states, **kwargs)
+            import torch
+
+            if not torch.is_tensor(hidden_states) or hidden_states.device.type != "musa":
+                return original.forward(self, hidden_states, **kwargs)
+            return MLP.forward(self, hidden_states, **kwargs)
+
+    return TEFusedMLPUnfused
 
 
 def _te_norm_unfused(original: Any) -> Any:
@@ -258,9 +531,12 @@ def _te_norm_unfused(original: Any) -> Any:
     assertion in transformer_engine ops/basic/layer_norm.py). The replacement
     subclasses those TE modules -- so ``isinstance`` checks, parameter names,
     dtypes, initialization and ``sharded_state_dict`` stay TE's -- and only
-    replaces ``forward`` with the functional implementation, casting the norm
-    parameters to the input dtype exactly like TE's kernel contract. TE_NORM=1
-    keeps upstream for upgrade validation.
+    replaces ``forward`` with the functional implementation. The dtype
+    contract matches TE's ``op_forward``: the compute dtype is the autocast
+    dtype when autocast is active and the parameter dtype otherwise, and the
+    *input* is cast to it (never the reverse), so mixed-dtype activations are
+    absorbed exactly like the native kernel. TE_NORM=1 keeps upstream for
+    upgrade validation.
     """
     import sys
 
@@ -300,12 +576,23 @@ def _te_norm_unfused(original: Any) -> Any:
                 )
 
             def forward(self, input):
+                # Same contract as TE's basic norm op_forward: compute in
+                # maybe_autocast_dtype(default=weight.dtype), casting the
+                # input (never promoting the parameters to the input's
+                # dtype). The output therefore leaves in the parameter dtype,
+                # absorbing mixed-dtype activations before the next TE module.
+                dtype = _te_norm_compute_dtype(torch, self.weight.dtype)
+                if input.dtype != dtype:
+                    input = input.to(dtype)
                 weight = self.weight
+                if dtype != weight.dtype:
+                    weight = weight.to(dtype)
                 if getattr(self, "zero_centered_gamma", False):
                     weight = weight + 1
-                weight = weight.to(input.dtype)
                 if normalization == "LayerNorm":
-                    bias = self.bias.to(input.dtype)
+                    bias = self.bias
+                    if bias is not None and dtype != bias.dtype:
+                        bias = bias.to(dtype)
                     return torch.nn.functional.layer_norm(
                         input, self.hidden_size, weight, bias, self.eps
                     )
@@ -343,6 +630,78 @@ def _te_norm_unfused(original: Any) -> Any:
 
 PATCHES = (
     AttrPatch(
+        id="transformer_engine.layer-norm-linear.native-unfused",
+        version_gates=("transformer_engine >=2.0,<2.1",),
+        target="transformer_engine.pytorch.module.layernorm_linear:LayerNormLinear",
+        rebind_prefixes=("transformer_engine",),
+        replace=_unfused_te_native_layernorm_linear,
+        rationale=(
+            "Direct TransformerEngine models (te.pytorch.TransformerLayer in "
+            "the megatron-FSDP suite) normalize inside "
+            "module/_common.py:apply_normalization, whose MUSA kernel aborts "
+            "in csrc/common.cpp allocateSpace ('Should never reach here'). "
+            "56 mfsdp cases fail this way; the megatron-scope "
+            "TELayerNormColumnParallelLinear patch cannot reach modules TE "
+            "constructs itself."
+        ),
+        strategy=(
+            "Subclass te.pytorch.LayerNormLinear so isinstance checks, "
+            "parameters, quantizer state and checkpoint metadata stay TE's, "
+            "and reroute only the eligible plain path (live MUSA input, no "
+            "FP8/calibration, no user-buffer overlap, no CPU offloading, "
+            "tp_size 1, no layernorm-output return, LayerNorm/RMSNorm) "
+            "through functional normalization plus F.linear on the split "
+            "parameters -- forward and backward both run on plain PyTorch "
+            "ops, bypassing the fused kernel and its custom autograd node. "
+            "The norm follows TE's dtype contract (input cast to the "
+            "activation/parameter dtype). Everything else calls the original "
+            "forward so its own errors surface. TE_FUSED_LAYERNORM=1 "
+            "restores upstream for upgrade validation."
+        ),
+        upstream=(
+            "TransformerEngine pytorch/module/layernorm_linear.py:"
+            "LayerNormLinear.forward; module/_common.py:apply_normalization"
+        ),
+        remove_when=(
+            "Remove after the MUSA TransformerEngine fused LayerNormLinear "
+            "native path passes the megatron-FSDP te_transformer cases "
+            "(test_mfsdp_fully_shard and the DCP round-trips) on MUSA with "
+            "this patch disabled."
+        ),
+    ),
+    AttrPatch(
+        id="transformer_engine.layer-norm-mlp.native-unfused",
+        version_gates=("transformer_engine >=2.0,<2.1",),
+        target="transformer_engine.pytorch.module.layernorm_mlp:LayerNormMLP",
+        rebind_prefixes=("transformer_engine",),
+        replace=_unfused_te_native_layernorm_mlp,
+        rationale=(
+            "te.pytorch.TransformerLayer's MLP block normalizes through the "
+            "same module/_common.py:apply_normalization path as "
+            "LayerNormLinear and aborts in the same MUSA allocateSpace "
+            "assertion."
+        ),
+        strategy=(
+            "Subclass te.pytorch.LayerNormMLP with the same eligibility and "
+            "contract as the LayerNormLinear replacement; the eligible plain "
+            "path is functional norm -> fc1 -> gelu(tanh, matching tex.gelu) "
+            "or relu -> fc2 on plain PyTorch ops. Gated activations and "
+            "every non-plain configuration keep the original forward so "
+            "their own errors surface. TE_FUSED_LAYERNORM=1 restores "
+            "upstream for upgrade validation."
+        ),
+        upstream=(
+            "TransformerEngine pytorch/module/layernorm_mlp.py:"
+            "LayerNormMLP.forward; module/_common.py:apply_normalization"
+        ),
+        remove_when=(
+            "Remove together with "
+            "transformer_engine.layer-norm-linear.native-unfused after the "
+            "native fused path passes the megatron-FSDP te_transformer "
+            "cases on MUSA."
+        ),
+    ),
+    AttrPatch(
         id="megatron.te.layer-norm-linear.unfused",
         version_gates=("transformer_engine >=2.0,<2.1",),
         target="megatron.core.extensions.transformer_engine:TELayerNormColumnParallelLinear",
@@ -356,7 +715,11 @@ PATCHES = (
         ),
         strategy=(
             "For LayerNorm only, use PyTorch normalization followed by TEColumnParallelLinear, "
-            "retaining FP8, TP, norm parameter names and sharding. The exact base class with a "
+            "retaining FP8, TP, norm parameter names and sharding. The norm step follows TE's "
+            "op contract: it computes in maybe_autocast_dtype(default=norm-weight dtype) and "
+            "casts the input to it, so a mixed-dtype activation (the fp32 learned "
+            "position-embedding sum entering a bf16 model) is absorbed here instead of "
+            "tripping the next TE linear's dtype assert. The exact base class with a "
             "non-LayerNorm config still constructs the original fused module; subclasses always "
             "run their own constructor (the fused signature cannot accept their "
             "(config, tp_comm_buffer_name) call shape) and this class then honors the config's "
@@ -473,8 +836,12 @@ PATCHES = (
             "LayerNorm/RMSNorm chosen from config.normalization, so isinstance "
             "checks, parameter names, dtypes, initialization and "
             "sharded_state_dict stay TE's, while forward runs the functional "
-            "norm with parameters cast to the input dtype (TE's kernel "
-            "contract). Upstream validation for unsupported normalization "
+            "norm under TE's own dtype contract: the compute dtype is "
+            "maybe_autocast_dtype(default=weight.dtype) and the *input* is "
+            "cast to it, never the reverse, so mixed-dtype activations (the "
+            "fp32 learned position-embedding sum entering a bf16 model) are "
+            "absorbed exactly like the native kernel instead of leaking to the "
+            "next TE linear. Upstream validation for unsupported normalization "
             "values is retained. Only declines (keeping upstream) when TE is "
             "absent, no MUSA runtime is live, or TE_NORM=1 requests the "
             "upgrade-validation path."
@@ -488,6 +855,37 @@ PATCHES = (
             "passes forward/backward, zero-centered gamma, meta materialization, "
             "checkpoint key/sharding and multi-rank sequence-parallel tests; "
             "re-run the 44 affected node ids with TE_NORM=1 before deleting."
+        ),
+    ),
+    AttrPatch(
+        id="megatron.te.fused-mlp.unfused",
+        version_gates=("transformer_engine >=2.0,<2.1",),
+        target="megatron.core.extensions.transformer_engine:TEFusedMLP",
+        replace=_unfused_te_fused_mlp,
+        rationale=(
+            "Megatron's TEFusedMLP (the use_te_fused_ops GPT spec, e.g. "
+            "models/test_gpt_model.py::TestGPTWithFusedOps) runs its "
+            "norm+MLP chain through TE's operation fuser, whose BasicLayerNorm "
+            "op aborts in the same MUSA allocateSpace assertion as the fused "
+            "norm modules; the module-level LayerNormLinear/LayerNormMLP "
+            "patches cannot reach an ops.Sequential chain."
+        ),
+        strategy=(
+            "Subclass TEFusedMLP and reroute non-FP8 MUSA forwards to the "
+            "plain MLP.forward decomposition: linear_fc1 (the unfused "
+            "norm-linear replacement handles normalization), the functional "
+            "activation, then linear_fc2. FP8 and non-MUSA inputs keep the "
+            "original fused forward so quantization semantics and its own "
+            "errors surface. TE_FUSED_LAYERNORM=1 restores upstream."
+        ),
+        upstream=(
+            "NVIDIA/Megatron-LM megatron/core/extensions/transformer_engine.py:"
+            "TEFusedMLP; megatron/core/transformer/mlp.py:MLP.forward"
+        ),
+        remove_when=(
+            "Remove after the MUSA TransformerEngine operation fuser's "
+            "BasicLayerNorm passes TestGPTWithFusedOps on MUSA with this "
+            "patch disabled."
         ),
     ),
 )

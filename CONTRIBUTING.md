@@ -3,7 +3,7 @@
 This guide describes the design and extension contracts. [README.md](README.md)
 covers installation, switches and fallback costs; [AGENTS.md](AGENTS.md) owns the
 operational workflow and full acceptance commands. [中文](CONTRIBUTING_zh.md).
-The ledger in `patches/` and `report()` is the source of truth for patch metadata.
+The ledger in `patches/` and `report()` is the source of truth for patch metadata; [docs/PATCHES.md](docs/PATCHES.md) is the human-readable catalog.
 
 ## 1. Ground rules
 

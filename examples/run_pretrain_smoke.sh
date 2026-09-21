@@ -15,7 +15,7 @@
 #   MEGATRON_LM_PATH=/path/to/Megatron-LM NPUS=2 ROPE_FUSION=1 bash examples/run_pretrain_smoke.sh
 set -euo pipefail
 
-MEGATRON_LM_PATH="${MEGATRON_LM_PATH:?set MEGATRON_LM_PATH to a Megatron-LM checkout}"
+MEGATRON_LM_PATH="${MEGATRON_LM_PATH:-/ipfs/jingyuan/Megatron-LM-core_v0.19.0}"
 # Use the interpreter that has torch + torch_musa installed; a bare `torchrun`
 # from PATH may resolve to a different environment.
 PYTHON="${PYTHON:-python}"

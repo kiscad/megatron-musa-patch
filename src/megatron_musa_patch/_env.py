@@ -37,6 +37,19 @@ Variable                           Meaning                               Default
                                    fallback, keeping upstream's
                                    "apply_rope_fusion is not available"
                                    verdict.
+``..._GDN_TILELANG``               ``0`` declines the torch-kernels       ``1``
+                                   TileLang dispatch of Megatron's (and
+                                   mcore-bridge's) chunked gated delta
+                                   rule, keeping flash-linear-attention.
+``..._ATTN_BACKEND``              Attention kernel order for the shapes  ``auto``
+                                   the MuDNN flash backward rejects:
+                                   ``auto`` (native flash inside its
+                                   measured backward window, then mate's
+                                   TileLang flash, then TE's unfused
+                                   backend), ``mudnn`` (native flash
+                                   whenever the forward accepts it),
+                                   ``mate`` (prefer the TileLang kernels),
+                                   ``unfused`` (reference backend).
 ``..._JIT_WARMUP``                 ``1`` keeps upstream's JIT warm-up.   ``0``
 ``..._DP_OVERLAP``                 ``1`` honours the DP-overlap flags    ``0``
                                    again (legacy spelling

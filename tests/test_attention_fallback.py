@@ -68,6 +68,163 @@ def test_flash_gate_rejects_head_dim_outside_window(musa_live, head_dim, trainin
     assert _attention._flash_kernel_unsupported(stub, _musa_query(torch.bfloat16, head_dim))
 
 
+@pytest.mark.parametrize("head_dim", [144, 168, 176, 184, 192])
+def test_flash_backward_window_rejects_broken_dims_in_training(musa_live, head_dim):
+    """MuDNN flash backward fails for 144 and 168..192 although forward works.
+
+    Training calls may run backward (directly or through checkpoint
+    recompute), so those head dims must not take the native flash path.
+    """
+    stub = _tedpa_stub(torch.bfloat16, head_dim, training=True)
+    assert _attention._flash_kernel_unsupported(stub, _musa_query(torch.bfloat16, head_dim))
+    assert not _attention._flash_kernel_unsupported_fwd(stub, _musa_query(torch.bfloat16, head_dim))
+
+
+@pytest.mark.parametrize("head_dim", [144, 192])
+def test_flash_backward_window_keeps_inference_on_flash(musa_live, head_dim):
+    """Inference-only calls keep the fast forward for the full window."""
+    stub = _tedpa_stub(torch.bfloat16, head_dim, training=False)
+    assert not _attention._flash_kernel_unsupported(stub, _musa_query(torch.bfloat16, head_dim))
+
+
+def test_flash_backward_window_covers_grad_enabled_calls(musa_live):
+    """Grad-enabled calls with grad-requiring inputs count even in eval mode."""
+    stub = _tedpa_stub(torch.bfloat16, 192, training=False)
+    plain = _musa_query(torch.bfloat16, 192)
+    assert not _attention._flash_kernel_unsupported(stub, plain)
+    real = SimpleNamespace(
+        device=SimpleNamespace(type="musa"),
+        dtype=torch.bfloat16,
+        size=lambda dim, d=192: d,
+        requires_grad=True,
+    )
+    assert torch.is_grad_enabled()
+    assert _attention._flash_kernel_unsupported(stub, real)
+
+
+def test_flash_backward_window_rejects_mixed_head_dims(musa_live):
+    """Every measured mixed qk/v pair fails the MuDNN flash backward."""
+    stub = _tedpa_stub(torch.bfloat16, 192, training=True)
+    assert _attention._flash_kernel_unsupported(
+        stub,
+        _musa_query(torch.bfloat16, 192),
+        _musa_query(torch.bfloat16, 192),
+        _musa_query(torch.bfloat16, 128),
+    )
+
+
+def test_attn_backend_env_values(monkeypatch):
+    monkeypatch.delenv("MEGATRON_MUSA_PATCH_ATTN_BACKEND", raising=False)
+    assert _attention._attn_backend() == "auto"
+    for raw, expected in (
+        ("auto", "auto"),
+        ("MUDNN", "mudnn"),
+        (" mate ", "mate"),
+        ("unfused", "unfused"),
+        ("nonsense", "auto"),
+    ):
+        monkeypatch.setenv("MEGATRON_MUSA_PATCH_ATTN_BACKEND", raw)
+        assert _attention._attn_backend() == expected
+
+
+def _mate_tensors(dqk, dv, dtype=torch.bfloat16, heads=8, kv_heads=None):
+    def t(last, h):
+        return SimpleNamespace(
+            device=SimpleNamespace(type="musa"), dtype=dtype, shape=(4, 8, h, last)
+        )
+
+    return t(dqk, heads), t(dqk, kv_heads or heads), t(dv, kv_heads or heads)
+
+
+@pytest.mark.parametrize(
+    "dqk,dv,mask,bias,dropout,expected",
+    [
+        (192, 128, "causal", None, 0.0, True),  # the MLA shape
+        (160, 128, "no_mask", None, 0.0, True),
+        (144, 144, "causal", None, 0.0, True),
+        (192, 192, "causal_bottom_right", None, 0.0, True),
+        (128, 128, "causal", None, 0.0, False),  # MuDNN-safe: never routed to mate
+        (128, 64, "causal", None, 0.0, False),  # mate has no config for it
+        (256, 128, "causal", None, 0.0, False),
+        (192, 128, "causal", object(), 0.0, False),  # bias unsupported
+        (192, 128, "causal", None, 0.2, False),  # mate has no dropout
+        (192, 128, "padding_causal", None, 0.0, False),  # mask tensors unsupported
+        (192, 128, "arbitrary", None, 0.0, False),
+    ],
+)
+def test_mate_eligibility(musa_live, dqk, dv, mask, bias, dropout, expected):
+    stub = _tedpa_stub(torch.bfloat16, dqk, dropout=dropout, training=dropout > 0)
+    q, k, v = _mate_tensors(dqk, dv)
+    assert _attention._mate_eligible(stub, q, k, v, mask, bias, "sbhd") is expected
+
+
+def test_mate_eligibility_requires_divisible_gqa(musa_live):
+    stub = _tedpa_stub(torch.bfloat16, 192)
+    q, k, v = _mate_tensors(192, 128, heads=7, kv_heads=3)
+    assert not _attention._mate_eligible(stub, q, k, v, "causal", None, "sbhd")
+
+
+def test_mate_dense_forward_transposes_sbhd_and_forwards_flags(musa_live, monkeypatch):
+    calls = {}
+
+    def fake_fn(q, k, v, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k,
+                causal, softmax_scale, deterministic):
+        calls.update(
+            shape=tuple(q.shape),
+            causal=causal,
+            scale=softmax_scale,
+            deterministic=deterministic,
+            kshape=tuple(k.shape),
+            vshape=tuple(v.shape),
+            cu_seqlens=cu_seqlens_q.tolist(),
+            cu_seqlens_k=cu_seqlens_k.tolist(),
+            max_seqlen=(max_seqlen_q, max_seqlen_k),
+        )
+        return v.expand_as(q[..., : v.shape[-1]]).clone()
+
+    monkeypatch.setattr(_attention, "_mate_flash_fn", lambda: fake_fn)
+    stub = _tedpa_stub(torch.bfloat16, 192, training=True)
+    stub.softmax_scale = 0.137
+    stub.deterministic = True
+    # sbhd: [s, b, h, d] -> mate sees [b, s, h, d]
+    q = torch.randn(4, 2, 8, 192)
+    k = torch.randn(4, 2, 8, 192)
+    v = torch.randn(4, 2, 8, 128)
+    out = _attention._mate_dense_forward(stub, q, k, v, "causal", "sbhd")
+    # mate's dense entry point has no backward on 0.2.x, so the call goes through
+    # the varlen form: uniform sequences flattened to (batch*seq, heads, dim).
+    assert calls["shape"] == (8, 8, 192)
+    assert calls["kshape"] == (8, 8, 192)
+    assert calls["vshape"] == (8, 8, 128)
+    assert calls["cu_seqlens"] == [0, 4, 8], "one uniform segment per batch entry"
+    assert calls["cu_seqlens_k"] == [0, 4, 8]
+    assert calls["max_seqlen"] == (4, 4)
+    assert calls["causal"] is True
+    assert calls["scale"] == 0.137
+    assert calls["deterministic"] is True
+    assert tuple(out.shape) == (4, 2, 1024), "sbhd output flattened like TE's backends"
+
+
+def test_mate_dense_forward_keeps_bshd(musa_live, monkeypatch):
+    def fake_fn(q, k, v, **kwargs):
+        return v
+
+    monkeypatch.setattr(_attention, "_mate_flash_fn", lambda: fake_fn)
+    stub = _tedpa_stub(torch.bfloat16, 192, training=True)
+    q = torch.randn(2, 4, 8, 192)
+    v = torch.randn(2, 4, 8, 128)
+    out = _attention._mate_dense_forward(stub, q, q, v, "no_mask", "bshd")
+    assert tuple(out.shape) == (2, 4, 1024), "bshd output flattened like TE's backends"
+    assert torch.equal(out, v.reshape(2, 4, -1))
+
+
+def test_mate_dense_forward_declines_without_mate(musa_live, monkeypatch):
+    monkeypatch.setattr(_attention, "_mate_flash_fn", lambda: None)
+    stub = _tedpa_stub(torch.bfloat16, 192, training=True)
+    q = torch.randn(4, 2, 8, 192)
+    assert _attention._mate_dense_forward(stub, q, q, q, "causal", "sbhd") is None
+
+
 def test_te_padding_mask_normalization():
     """Megatron mask forms map onto the shapes TE's get_full_mask consumes."""
     q_pad = torch.tensor([[False, False, True], [False] * 3])
@@ -184,6 +341,151 @@ def test_musa_bf16_training_delegates_to_native_flash(musa_live):
     assert wrapped(stub, q, k, v, None, "causal") == "native"
     assert len(calls) == 1
     assert not _attention._flash_kernel_unsupported(stub, q, k, v)
+
+
+def test_musa_mla_shape_routes_to_mate_and_matches_reference(musa_live, monkeypatch):
+    """MLA's 192/128 training shape runs mate's flash and stays numerically sane.
+
+    MuDNN's flash backward rejects the mixed head dims, so the dispatch must
+    not call the native path; with mate installed the TileLang kernel serves
+    the call, matching the fp64 oracle within bf16 tolerance and producing
+    finite gradients. Skipped when mate is not importable.
+    """
+    _device_required()
+    pytest.importorskip("mate")
+    monkeypatch.delenv("MEGATRON_MUSA_PATCH_ATTN_BACKEND", raising=False)
+    torch.manual_seed(23)
+    s, b, h = 64, 2, 8
+    q = torch.randn(s, b, h, 192, device="musa", dtype=torch.bfloat16, requires_grad=True)
+    k = torch.randn(s, b, h, 192, device="musa", dtype=torch.bfloat16, requires_grad=True)
+    v = torch.randn(s, b, h, 128, device="musa", dtype=torch.bfloat16, requires_grad=True)
+    stub = SimpleNamespace(
+        training=True,
+        attention_dropout=0.0,
+        softmax_scale=None,
+        deterministic=True,
+        window_size=None,
+        qkv_format="sbhd",
+        config=None,
+        unfused_attention=None,
+    )
+    native_calls = []
+    wrapped = _attention._tedpa_forward(lambda *a, **kw: native_calls.append(a) or "native")
+    out = wrapped(stub, q, k, v, None, "causal")
+    assert native_calls == [], "the mixed-dim training shape must not reach MuDNN flash"
+    assert out.shape == (s, b, h * 128), "TE's dense contract flattens heads"
+    assert out.dtype == torch.bfloat16
+    ref = _fp64_reference(q, k, v)
+    torch.testing.assert_close(out.float().cpu(), ref.float().cpu(), rtol=2e-2, atol=2e-2)
+    grads = torch.autograd.grad(out.float().square().sum(), (q, k, v))
+    for grad in grads:
+        assert torch.isfinite(grad).all()
+    del q, k, v, out, ref, grads
+    torch.musa.empty_cache()
+
+
+def test_deterministic_request_declines_a_mate_build_that_refuses_it(musa_live, monkeypatch):
+    """A deterministic request must never be silently downgraded to serve mate.
+
+    mate 0.1.2 accepts ``deterministic`` and then asserts it is False, so the
+    dispatch declines mate for those calls and lets TE's unfused backend --
+    which honours the request -- run them. The MuDNN flash path stays out of
+    reach either way, because its backward rejects the mixed head dims.
+    """
+    _device_required()
+    pytest.importorskip("mate")
+    monkeypatch.delenv("MEGATRON_MUSA_PATCH_ATTN_BACKEND", raising=False)
+    monkeypatch.setattr(_attention, "_MATE_DETERMINISTIC", False)
+    monkeypatch.setattr(_attention, "_MATE_DETERMINISTIC_WARNED", False)
+    torch.manual_seed(23)
+    s, b, h = 64, 2, 8
+    q = torch.randn(s, b, h, 192, device="musa", dtype=torch.bfloat16, requires_grad=True)
+    k = torch.randn(s, b, h, 192, device="musa", dtype=torch.bfloat16, requires_grad=True)
+    v = torch.randn(s, b, h, 128, device="musa", dtype=torch.bfloat16, requires_grad=True)
+    unfused_calls, native_calls = [], []
+
+    def unfused_backend(*args, **kwargs):
+        unfused_calls.append(kwargs.get("attn_mask_type"))
+        return torch.zeros(s, b, h * 128, device="musa", dtype=torch.bfloat16)
+
+    stub = SimpleNamespace(
+        training=True,
+        attention_dropout=0.0,
+        softmax_scale=None,
+        deterministic=True,
+        window_size=None,
+        qkv_format="sbhd",
+        config=None,
+        unfused_attention=unfused_backend,
+    )
+    wrapped = _attention._tedpa_forward(lambda *a, **kw: native_calls.append(a) or "native")
+
+    out = wrapped(stub, q, k, v, None, "causal")
+
+    assert native_calls == [], "MuDNN flash backward rejects the mixed head dims"
+    assert len(unfused_calls) == 1, "the deterministic request must land on TE's unfused backend"
+    assert out.shape == (s, b, h * 128), "TE's dense contract still holds"
+    assert out.dtype == torch.bfloat16
+    del q, k, v, out
+    torch.musa.empty_cache()
+
+
+def test_musa_mla_shape_env_selects_backend_order(musa_live, monkeypatch):
+    """ATTN_BACKEND selects the kernel order for the MuDNN-unsafe MLA shape.
+
+    ``unfused`` must bypass mate entirely, ``mate`` must prefer the TileLang
+    kernel over both alternatives, and ``auto`` lands on mate for the mixed
+    192/128 training shape that MuDNN's backward rejects.
+    """
+    _device_required()
+    pytest.importorskip("mate")
+    torch.manual_seed(23)
+    q = torch.randn(8, 1, 2, 192, device="musa", dtype=torch.bfloat16, requires_grad=True)
+    v = torch.randn(8, 1, 2, 128, device="musa", dtype=torch.bfloat16, requires_grad=True)
+
+    unfused_calls, mate_calls, native_calls = [], [], []
+
+    def unfused_backend(*args, **kwargs):
+        unfused_calls.append(kwargs.get("attn_mask_type"))
+        return torch.zeros(8, 1, 256, device="musa", dtype=torch.bfloat16)
+
+    def fake_mate(q_, k_, v_, **kwargs):
+        mate_calls.append(kwargs.get("causal"))
+        assert tuple(q_.shape) == (8, 2, 192), "sbhd reaches mate flattened for varlen"
+        assert kwargs["cu_seqlens_q"].tolist() == [0, 8], "one uniform segment"
+        return torch.zeros(8, 2, 128, device="musa", dtype=torch.bfloat16)
+
+    stub = SimpleNamespace(
+        training=True,
+        attention_dropout=0.0,
+        softmax_scale=None,
+        deterministic=True,
+        window_size=None,
+        qkv_format="sbhd",
+        config=None,
+        unfused_attention=unfused_backend,
+    )
+    monkeypatch.setattr(_attention, "_mate_flash_fn", lambda: fake_mate)
+    wrapped = _attention._tedpa_forward(lambda *a, **kw: native_calls.append(a) or "native")
+
+    monkeypatch.setenv("MEGATRON_MUSA_PATCH_ATTN_BACKEND", "unfused")
+    out = wrapped(stub, q, q, v, None, "causal")
+    assert (len(unfused_calls), len(mate_calls), len(native_calls)) == (1, 0, 0)
+    assert out.shape == (8, 1, 256), "TE's dense contract flattens heads"
+
+    monkeypatch.setenv("MEGATRON_MUSA_PATCH_ATTN_BACKEND", "mate")
+    wrapped(stub, q, q, v, None, "causal")
+    assert (len(unfused_calls), len(mate_calls), len(native_calls)) == (1, 1, 0)
+
+    monkeypatch.setenv("MEGATRON_MUSA_PATCH_ATTN_BACKEND", "auto")
+    wrapped(stub, q, q, v, None, "causal")
+    assert (len(unfused_calls), len(mate_calls), len(native_calls)) == (1, 2, 0)
+
+    monkeypatch.setenv("MEGATRON_MUSA_PATCH_ATTN_BACKEND", "mudnn")
+    wrapped(stub, q, q, v, None, "causal")
+    assert (len(unfused_calls), len(mate_calls), len(native_calls)) == (1, 2, 1)
+    del q, v, out
+    torch.musa.empty_cache()
 
 
 def test_musa_out_of_window_head_dim_routes_to_unfused(musa_live):
