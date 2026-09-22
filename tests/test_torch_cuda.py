@@ -412,6 +412,41 @@ def test_backend_without_graph_support_remains_supported(fake_backend):
     assert fake_backend.torch.cuda.CUDAGraph is original_graph
 
 
+def _with_oom_binding(fake_backend):
+    """Give the fake runtime torch_musa's allocator hook and an empty torch._C."""
+    attach = lambda observer: None
+    fake_backend.torch._C = types.ModuleType("torch._C")
+    fake_backend.torch.musa._MUSAC = types.SimpleNamespace(
+        _musa_attach_out_of_memory_observer=attach
+    )
+    return attach
+
+
+def test_oom_observer_binding_uses_the_musa_allocator_hook(fake_backend):
+    attach = _with_oom_binding(fake_backend)
+    torch_c = fake_backend.torch._C
+    torch_cuda.apply()
+    assert torch_c._cuda_attach_out_of_memory_observer is attach
+    torch_cuda.unapply()
+    assert "_cuda_attach_out_of_memory_observer" not in vars(torch_c)
+
+
+def test_oom_observer_binding_provided_upstream_is_left_alone(fake_backend):
+    _with_oom_binding(fake_backend)
+    upstream = lambda observer: None
+    fake_backend.torch._C._cuda_attach_out_of_memory_observer = upstream
+    torch_cuda.apply()
+    assert fake_backend.torch._C._cuda_attach_out_of_memory_observer is upstream
+    torch_cuda.unapply()
+    assert fake_backend.torch._C._cuda_attach_out_of_memory_observer is upstream
+
+
+def test_backend_without_oom_observer_support_remains_supported(fake_backend):
+    fake_backend.torch._C = types.ModuleType("torch._C")
+    torch_cuda.apply()
+    assert not hasattr(fake_backend.torch._C, "_cuda_attach_out_of_memory_observer")
+
+
 def test_hook_metadata_and_engine_unapply(fake_backend, engine, monkeypatch):
     from megatron_musa_patch.patches._torch_backend import PATCHES
 
@@ -494,6 +529,23 @@ def test_tensor_type_reports_cuda_names(torch):
 def test_cuda_graph_class_is_bound(torch):
     assert torch.cuda.CUDAGraph is torch.musa.MUSAGraph
     assert importlib.import_module("torch.cuda.graphs").CUDAGraph is torch.musa.MUSAGraph
+
+
+def test_oom_observer_binding_reaches_the_musa_allocator(torch):
+    """Megatron-Bridge dumps a memory snapshot from this observer on OOM.
+
+    Observers cannot be detached, so this one stays registered for the rest of
+    the session; it only records its arguments.
+    """
+    torch_musa = importlib.import_module("torch_musa")
+    attach = torch._C._cuda_attach_out_of_memory_observer
+    assert attach is torch_musa._MUSAC._musa_attach_out_of_memory_observer
+    seen = []
+    attach(lambda *args: seen.append(args))
+    with pytest.raises(torch.OutOfMemoryError):
+        torch.empty(1 << 44, dtype=torch.uint8, device="cuda")  # 16 TiB
+    assert len(seen) == 1
+    assert len(seen[0]) == 4 and all(isinstance(value, int) for value in seen[0])
 
 
 def test_musa_move_works_for_te_float8_tensor(torch):

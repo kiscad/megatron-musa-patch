@@ -11,7 +11,7 @@
 |---|---|---|
 | `python.typing.override.backport` | `typing.override`（Megatron hook） | Megatron 0.19 要求 Python ≥3.12 并在模块层 `from typing import override`；MUSA 轮子是 CPython 3.10 构建，`megatron.training` 直接 import 失败。改为发布 `typing_extensions` 的实现（PEP 698 只是标记，无运行时语义）|
 | `python.typing.concatenate.ellipsis` | `typing.Concatenate`（Megatron hook） | CPython 3.11 起 `Concatenate` 允许结尾的 `Ellipsis`（PEP 612），3.10 在**求值注解时**就报错。`emerging_optimizers`（装上后 core 0.19 会急切导入）在模块层用了这个形式，导致 `import megatron.core` 死在类型注解里。把 Ellipsis 表达成哨兵 `ParamSpec`，其余下标一律委托给 stdlib 原对象 |
-| `torch.cuda.compat-layer` | `torch.cuda` | MUSA 版没有 CUDA 绑定；torchada + 4 个覆盖：`is_available()` 实时探测、`Tensor.type()` CUDA 名字、`CUDAGraph` 别名、tensor 子类（如 TE `Float8Tensor`）的 `.musa()` 迁移修复 |
+| `torch.cuda.compat-layer` | `torch.cuda` | MUSA 版没有 CUDA 绑定；torchada + 5 个覆盖：`is_available()` 实时探测、`Tensor.type()` CUDA 名字、`CUDAGraph` 别名、tensor 子类（如 TE `Float8Tensor`）的 `.musa()` 迁移修复、`torch._C._cuda_attach_out_of_memory_observer` 绑定（torch_musa 的 `_musa_attach_out_of_memory_observer`，回调签名一致；供 Megatron-Bridge 的 OOM 快照使用） |
 | `torch.cuda.device-capability.nvidia-scale` | `torch.cuda.get_device_capability` | Megatron 拿 capability 和 NVIDIA 阈值比较（≥8 的 grouped-GEMM 门）；上报合成的 `8.3` |
 | `megatron.training.get-device-arch-version.nvidia-scale` | `megatron.training.utils:get_device_arch_version` | 同类比较，走 `device_properties().major` |
 | `torch.distributed.clean-teardown` | `atexit` | 带着存活的 MCCL 进程组退出的运行出现过 watchdog 报错；退出时尽力 `destroy_process_group()` |

@@ -34,20 +34,24 @@ PATCHES = (
         undo=torch_cuda.unapply,
         strategy=(
             "Delegate general CUDA-to-MUSA adaptation to torchada, then apply "
-            "identity-tracked availability, tensor type, graph class, and subclass "
-            "transfer overrides; undo only project-owned bindings, not external "
+            "identity-tracked availability, tensor type, graph class, subclass "
+            "transfer and allocator OOM-observer overrides; undo only project-owned bindings, not external "
             "adapter side effects or another caller's active layer."
         ),
         rationale=(
             "Megatron requires working CUDA APIs on MUSA, a truthful availability "
             "probe, CUDA-spelled Tensor.type() queries and graph classes, and "
-            "device transfers that preserve TransformerEngine tensor subclasses."
+            "device transfers that preserve TransformerEngine tensor subclasses. "
+            "Megatron-Bridge attaches an OOM snapshot observer through "
+            "torch._C._cuda_attach_out_of_memory_observer, which the MUSA build and "
+            "torchada do not provide (5 Bridge 0.4.2 unit tests, 2026-09-21 sweep)."
         ),
         upstream="torchada; torch_musa/core/tensor_attrs.py; Megatron CUDA consumers",
         remove_when=(
             "The supported torchada/torch_musa stack provides CUDA adaptation plus "
             "MUSA availability, CUDA tensor type names, the graphs.CUDAGraph alias, "
-            "and subclass-safe transfers with transfer options intact; verify the "
+            "subclass-safe transfers with transfer options intact, and the "
+            "torch._C._cuda_attach_out_of_memory_observer binding; verify the "
             "contracts in tests/test_torch_cuda.py without these overrides."
         ),
     ),

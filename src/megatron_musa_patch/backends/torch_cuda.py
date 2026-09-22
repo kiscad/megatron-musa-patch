@@ -1,9 +1,10 @@
 """Lazy CUDA-to-MUSA adaptation for Megatron.
 
 ``torchada`` owns the general adapter: CUDA namespaces, device strings, tensor
-factories, distributed backends, and more. This module owns only four gaps:
-MUSA availability, CUDA tensor type names, the graph-class alias, and tensor
-subclass transfers. No torch or accelerator package is imported at module load.
+factories, distributed backends, and more. This module owns only five gaps:
+MUSA availability, CUDA tensor type names, the graph-class alias, tensor
+subclass transfers, and the allocator OOM-observer binding. No torch or
+accelerator package is imported at module load.
 
 Mutation boundary
 -----------------
@@ -151,6 +152,29 @@ def _alias_graph_class(torch: Any, musa: Any) -> None:
         _set_attr(graphs, "CUDAGraph", graph_cls)
 
 
+def _alias_oom_observer(torch: Any) -> None:
+    """Register allocator OOM observers under the CUDA binding name.
+
+    ``torch._C._cuda_attach_out_of_memory_observer`` does not exist on the MUSA
+    build and torchada does not translate it, although it already routes
+    ``torch.cuda.memory._record_memory_history`` and ``_snapshot`` to torch_musa.
+    torch_musa's ``_MUSAC._musa_attach_out_of_memory_observer`` takes the same
+    ``(device, alloc, device_alloc, device_free)`` integer callback and fires on
+    allocator OOM (measured on device), so the binding is a plain alias.
+    Megatron-Bridge's memory profiling calls it right after enabling the
+    history (``training/utils/train_utils.py:start_memory_history_recording``).
+    A binding already provided by the stack is left alone.
+    """
+    binding = getattr(sys.modules.get("torch_musa"), "_MUSAC", None)
+    attach = getattr(binding, "_musa_attach_out_of_memory_observer", None)
+    torch_c = getattr(torch, "_C", None)
+    if attach is None or torch_c is None:  # Some backend releases do not expose it.
+        return
+    if hasattr(torch_c, "_cuda_attach_out_of_memory_observer"):
+        return
+    _set_attr(torch_c, "_cuda_attach_out_of_memory_observer", attach)
+
+
 def _fix_tensor_musa_for_subclasses(torch: Any) -> None:
     """Use aten .to() for subclasses affected by torch_musa's C dispatch shim.
 
@@ -262,6 +286,7 @@ def apply() -> None:
             _alias_availability(torch, musa)
             _alias_tensor_type_names(torch)
             _alias_graph_class(torch, musa)
+            _alias_oom_observer(torch)
             _fix_tensor_musa_for_subclasses(torch)
             _refresh_transformers_device_constants()
         except BaseException:

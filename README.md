@@ -113,7 +113,7 @@ to it automatically, with a warning.
 
 ## What gets changed
 
-On a MUSA PyTorch build `torch.cuda` is a dead shell (no `_cuda_*` bindings) and Megatron references it everywhere. [torchada](https://pypi.org/project/torchada/) — Moore Threads' own CUDA→MUSA adapter — does the mechanical translation; this package adds four Megatron-specific overrides on top of it plus roughly forty Megatron patches: torch.cuda / torch.distributed shims, LayerNorm/RMSNorm and TE norm-linear fallbacks, TE attention capability dispatch and FP8 model init, MoE topk/permutation/grouped-GEMM demotions, fused RoPE via the MT apex fork, the GDN chunked gated delta rule on torch-kernels' TileLang kernels, checkpoint writer/barrier hardening, and training-argument compatibility.
+On a MUSA PyTorch build `torch.cuda` is a dead shell (no `_cuda_*` bindings) and Megatron references it everywhere. [torchada](https://pypi.org/project/torchada/) — Moore Threads' own CUDA→MUSA adapter — does the mechanical translation; this package adds five Megatron-specific overrides on top of it plus roughly forty Megatron patches: torch.cuda / torch.distributed shims, LayerNorm/RMSNorm and TE norm-linear fallbacks, TE attention capability dispatch and FP8 model init, MoE topk/permutation/grouped-GEMM demotions, fused RoPE via the MT apex fork, the GDN chunked gated delta rule on torch-kernels' TileLang kernels, checkpoint writer/barrier hardening, and training-argument compatibility.
 
 The per-patch catalog — one row per patch with its target and root cause, plus kernel-stack version bindings and retired patches — lives in [docs/PATCHES.md](docs/PATCHES.md). The live, machine-readable list — `id`, `rationale`, `strategy`, `upstream`, `remove_when` — is `megatron_musa_patch.report()`.
 
