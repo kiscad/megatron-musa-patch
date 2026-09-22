@@ -105,7 +105,7 @@ CUDA_DEVICE_MAX_CONNECTIONS=1
 
 ## 改了什么
 
-MUSA 版 PyTorch 完全没有 `_cuda_*` 绑定，`torch.cuda` 是空壳，而 Megatron 到处引用它。[torchada](https://pypi.org/project/torchada/)（摩尔线程自己的 CUDA→MUSA 适配层）负责机械翻译；本包在其之上补 5 个 Megatron 专用覆盖，外加约四十个 Megatron patch：torch.cuda / torch.distributed 兼容层、LayerNorm/RMSNorm 与 TE norm-linear 回退、TE attention 能力分发与 FP8 模型初始化、MoE topk/permutation/grouped-GEMM 降级、MT apex fork 的融合 RoPE、GDN chunked gated delta rule 的 torch-kernels TileLang kernel、checkpoint 写入与屏障加固，以及训练参数兼容。
+MUSA 版 PyTorch 完全没有 `_cuda_*` 绑定，`torch.cuda` 是空壳，而 Megatron 到处引用它。[torchada](https://pypi.org/project/torchada/)（摩尔线程自己的 CUDA→MUSA 适配层）负责机械翻译；本包在其之上补 6 个 Megatron 专用覆盖，外加约四十个 Megatron patch：torch.cuda / torch.distributed 兼容层、LayerNorm/RMSNorm 与 TE norm-linear 回退、TE attention 能力分发与 FP8 模型初始化、MoE topk/permutation/grouped-GEMM 降级、MT apex fork 的融合 RoPE、GDN chunked gated delta rule 的 torch-kernels TileLang kernel、checkpoint 写入与屏障加固，以及训练参数兼容。
 
 逐条补丁的目录（每个补丁的目标与根因、kernel 栈版本绑定、已退役补丁）见[补丁目录](docs/PATCHES_zh.md)。实时、机器可读的清单（`id`、`rationale`、`strategy`、`upstream`、`remove_when`）是 `megatron_musa_patch.report()`。
 

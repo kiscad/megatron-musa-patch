@@ -86,6 +86,7 @@ def fake_backend(monkeypatch):
     # Preserve any unrelated real-runtime backend state a caller already owns.
     monkeypatch.setattr(torch_cuda, "_APPLIED", False)
     monkeypatch.setattr(torch_cuda, "_OVERRIDES", [])
+    monkeypatch.setattr(torch_cuda, "_FLAGS", [])
     yield types.SimpleNamespace(torch=torch, adapter=adapter, state=state, graphs=graphs)
     torch_cuda.unapply()
 
@@ -447,6 +448,74 @@ def test_backend_without_oom_observer_support_remains_supported(fake_backend):
     assert not hasattr(fake_backend.torch._C, "_cuda_attach_out_of_memory_observer")
 
 
+def _with_tf32_switches(fake_backend, musa_flag=True, standard=False):
+    """Model torch_musa's own TF32 flag next to PyTorch's standard switches."""
+    state = {"musa": musa_flag, "standard": standard}
+    torch_c = getattr(fake_backend.torch, "_C", None) or types.ModuleType("torch._C")
+    fake_backend.torch._C = torch_c
+
+    def set_cublas(value):
+        state["standard"] = bool(value)
+
+    def set_precision(precision):
+        state["standard"] = precision != "highest"
+
+    torch_c._get_cublas_allow_tf32 = lambda: state["standard"]
+    torch_c._set_cublas_allow_tf32 = set_cublas
+    torch_c._set_float32_matmul_precision = set_precision
+    binding = getattr(fake_backend.torch.musa, "_MUSAC", None) or types.SimpleNamespace()
+    binding._get_allow_tf32 = lambda: state["musa"]
+    binding._set_allow_tf32 = lambda value: state.__setitem__("musa", bool(value))
+    fake_backend.torch.musa._MUSAC = binding
+    return state, set_cublas, set_precision
+
+
+def test_tf32_defaults_to_cuda_full_precision(fake_backend):
+    state, _, _ = _with_tf32_switches(fake_backend, musa_flag=True, standard=False)
+    torch_cuda.apply()
+    assert state["musa"] is False, "vendor default (on) must follow the standard switch (off)"
+    torch_cuda.unapply()
+    assert state["musa"] is True, "undo restores the vendor value it replaced"
+
+
+def test_tf32_standard_switches_drive_the_musa_flag(fake_backend):
+    state, _, _ = _with_tf32_switches(fake_backend)
+    torch_c = fake_backend.torch._C
+    torch_cuda.apply()
+    torch_c._set_float32_matmul_precision("high")
+    assert state["musa"] is True
+    torch_c._set_cublas_allow_tf32(False)
+    assert state["musa"] is False
+    torch_c._set_cublas_allow_tf32(True)
+    assert state["musa"] is True
+
+
+def test_tf32_opt_in_before_activation_is_kept(fake_backend):
+    state, _, _ = _with_tf32_switches(fake_backend, musa_flag=True, standard=True)
+    torch_cuda.apply()
+    assert state["musa"] is True
+    torch_cuda.unapply()
+    assert state["musa"] is True
+
+
+def test_tf32_undo_restores_setters_and_respects_later_changes(fake_backend):
+    state, set_cublas, set_precision = _with_tf32_switches(fake_backend)
+    torch_c = fake_backend.torch._C
+    torch_cuda.apply()
+    assert torch_c._set_cublas_allow_tf32.__wrapped__ is set_cublas
+    torch_c._set_cublas_allow_tf32(True)  # the program's own choice after activation
+    torch_cuda.unapply()
+    assert torch_c._set_cublas_allow_tf32 is set_cublas
+    assert torch_c._set_float32_matmul_precision is set_precision
+    assert state["musa"] is True, "a flag changed after activation is not rolled back"
+
+
+def test_backend_without_tf32_flag_remains_supported(fake_backend):
+    fake_backend.torch._C = types.ModuleType("torch._C")
+    torch_cuda.apply()
+    assert "_set_cublas_allow_tf32" not in vars(fake_backend.torch._C)
+
+
 def test_hook_metadata_and_engine_unapply(fake_backend, engine, monkeypatch):
     from megatron_musa_patch.patches._torch_backend import PATCHES
 
@@ -546,6 +615,29 @@ def test_oom_observer_binding_reaches_the_musa_allocator(torch):
         torch.empty(1 << 44, dtype=torch.uint8, device="cuda")  # 16 TiB
     assert len(seen) == 1
     assert len(seen[0]) == 4 and all(isinstance(value, int) for value in seen[0])
+
+
+def test_fp32_matmul_follows_the_standard_tf32_switch(torch):
+    """RoPE angles need full fp32; TF32 puts a 1024-position angle 0.35 rad off."""
+    dim, positions = 128, 1024
+    inv_freq = 1.0 / (5_000_000 ** (torch.arange(0, dim, 2, dtype=torch.float64) / dim))
+    seq = torch.arange(positions, dtype=torch.float64)
+    reference = inv_freq[:, None] @ seq[None, :]
+
+    def angle_error():
+        got = inv_freq.float().musa()[:, None] @ seq.float().musa()[None, :]
+        return (got.double().cpu() - reference).abs().max().item()
+
+    previous = torch.get_float32_matmul_precision()
+    try:
+        torch.set_float32_matmul_precision("highest")
+        assert not torch.backends.mudnn.allow_tf32
+        assert angle_error() < 1e-3
+        torch.backends.cuda.matmul.allow_tf32 = True
+        assert torch.backends.mudnn.allow_tf32, "an explicit opt-in still reaches MUSA"
+        assert angle_error() > 1e-2
+    finally:
+        torch.set_float32_matmul_precision(previous)
 
 
 def test_musa_move_works_for_te_float8_tensor(torch):

@@ -1,10 +1,10 @@
 """Lazy CUDA-to-MUSA adaptation for Megatron.
 
 ``torchada`` owns the general adapter: CUDA namespaces, device strings, tensor
-factories, distributed backends, and more. This module owns only five gaps:
+factories, distributed backends, and more. This module owns only six gaps:
 MUSA availability, CUDA tensor type names, the graph-class alias, tensor
-subclass transfers, and the allocator OOM-observer binding. No torch or
-accelerator package is imported at module load.
+subclass transfers, the allocator OOM-observer binding, and the fp32 matmul
+TF32 contract. No torch or accelerator package is imported at module load.
 
 Mutation boundary
 -----------------
@@ -40,6 +40,9 @@ _MISSING = object()
 # owner, attribute, previous direct binding, our replacement. Direct bindings
 # matter: getattr() would populate torchada's caching proxy during bookkeeping.
 _OVERRIDES: list[tuple[Any, str, Any, Any]] = []
+# getter, setter, previous value, our value -- process-wide backend flags that are
+# not attributes (a C-level switch behind a property), restored only while unchanged.
+_FLAGS: list[tuple[Any, Any, Any, Any]] = []
 
 
 def is_applied() -> bool:
@@ -65,7 +68,22 @@ def _set_attr(owner: Any, name: str, replacement: Any) -> None:
     setattr(owner, name, replacement)
 
 
+def _set_flag(getter: Any, setter: Any, value: Any) -> None:
+    previous = getter()
+    if previous == value:
+        return
+    _FLAGS.append((getter, setter, previous, value))
+    setter(value)
+
+
 def _restore_overrides() -> None:
+    while _FLAGS:
+        getter, setter, previous, value = _FLAGS[-1]
+        if getter() != value:
+            logger.debug("Leaving a backend flag that was changed after activation")
+        else:
+            setter(previous)
+        _FLAGS.pop()
     while _OVERRIDES:
         owner, name, previous, replacement = _OVERRIDES[-1]
         if vars(owner).get(name, _MISSING) is not replacement:
@@ -173,6 +191,45 @@ def _alias_oom_observer(torch: Any) -> None:
     if hasattr(torch_c, "_cuda_attach_out_of_memory_observer"):
         return
     _set_attr(torch_c, "_cuda_attach_out_of_memory_observer", attach)
+
+
+def _align_tf32_with_cuda(torch: Any) -> None:
+    """Let PyTorch's standard fp32-matmul precision switches govern MUSA too.
+
+    On CUDA, fp32 matmuls run in full precision unless the program opts in via
+    ``torch.backends.cuda.matmul.allow_tf32`` or
+    ``torch.set_float32_matmul_precision`` (one flag, default off). torch_musa
+    ignores both and reads its own ``_MUSAC`` flag, which defaults to *on*, so
+    every fp32 matmul silently runs as TF32. Measured on device: a 1024-position
+    RoPE angle ``inv_freq @ positions`` is off by 0.35 rad (cos by 0.342) with the
+    vendor default and matches CPU fp32 with it off; neither standard switch moves
+    it. Mirror the standard flag into the MUSA flag now and whenever either
+    standard setter runs. muDNN has one flag for matmul and convolution, so fp32
+    convolutions follow the matmul switch (full precision by default, where
+    CUDA's cudnn default is TF32): stricter, never looser, than CUDA.
+    """
+    binding = getattr(sys.modules.get("torch_musa"), "_MUSAC", None)
+    get_musa = getattr(binding, "_get_allow_tf32", None)
+    set_musa = getattr(binding, "_set_allow_tf32", None)
+    torch_c = getattr(torch, "_C", None)
+    get_standard = getattr(torch_c, "_get_cublas_allow_tf32", None)
+    if get_musa is None or set_musa is None or get_standard is None:
+        return
+
+    def _mirrored(original: Any) -> Any:
+        @functools.wraps(original)
+        def _setter(*args, **kwargs):
+            result = original(*args, **kwargs)
+            set_musa(bool(get_standard()))
+            return result
+
+        return _setter
+
+    for name in ("_set_cublas_allow_tf32", "_set_float32_matmul_precision"):
+        original = vars(torch_c).get(name)
+        if original is not None:
+            _set_attr(torch_c, name, _mirrored(original))
+    _set_flag(get_musa, set_musa, bool(get_standard()))
 
 
 def _fix_tensor_musa_for_subclasses(torch: Any) -> None:
@@ -287,6 +344,7 @@ def apply() -> None:
             _alias_tensor_type_names(torch)
             _alias_graph_class(torch, musa)
             _alias_oom_observer(torch)
+            _align_tf32_with_cuda(torch)
             _fix_tensor_musa_for_subclasses(torch)
             _refresh_transformers_device_constants()
         except BaseException:
